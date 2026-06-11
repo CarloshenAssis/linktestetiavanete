@@ -94,7 +94,7 @@ export function MaterialCard({ material }: { material: Material }) {
 function Comments({ materialId }: { materialId: string }) {
   const [name, setName] = useState("");
   const [content, setContent] = useState("");
-  const [list, setList] = useState<{ id: string; author_name: string; content: string; created_at: string }[]>([]);
+  const [list, setList] = useState<{ id: string; author_name: string; content: string; created_at: string | null }[]>([]);
   const [loaded, setLoaded] = useState(false);
 
   async function load() {
