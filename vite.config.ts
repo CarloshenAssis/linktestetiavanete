@@ -6,7 +6,15 @@
 // You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
+// Deploy target for the Nitro build. Defaults to "vercel" so `npm run build`
+// produces a Vercel Build Output (.vercel/output) ready to deploy.
+// Override with NITRO_PRESET (e.g. "cloudflare-module") for other targets.
+const preset = process.env.NITRO_PRESET || "vercel";
+
 export default defineConfig({
+  // Passing an object force-enables the Nitro deploy plugin on `build`
+  // and lets us pick the deploy preset.
+  nitro: { preset },
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this
