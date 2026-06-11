@@ -1,5 +1,6 @@
-import { useState } from "react";
-import { Heart, MessageCircle, Share2, Download, FileText } from "lucide-react";
+import { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
+import { Heart, MessageCircle, Share2, Download, FileText, X } from "lucide-react";
 import { Material, shareWhatsApp, shareFacebook } from "@/lib/materials";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
@@ -9,6 +10,7 @@ export function MaterialCard({ material }: { material: Material }) {
   const [liked, setLiked] = useState(false);
   const [showComments, setShowComments] = useState(false);
   const [showShare, setShowShare] = useState(false);
+  const [lightbox, setLightbox] = useState(false);
 
   const url = material.signed_url ?? material.file_url;
 
@@ -28,22 +30,45 @@ export function MaterialCard({ material }: { material: Material }) {
     <div className="cloud-card overflow-hidden flex flex-col">
       <div className="aspect-[4/3] bg-gradient-to-br from-sky to-pink relative overflow-hidden">
         {material.category === "imagens" && (
-          <img src={url} alt={material.title} loading="lazy" className="w-full h-full object-cover" />
+          <button
+            type="button"
+            onClick={() => setLightbox(true)}
+            aria-label={`Ver "${material.title}" em tela cheia`}
+            className="block w-full h-full cursor-zoom-in"
+          >
+            <img src={url} alt={material.title} loading="lazy" className="w-full h-full object-cover" />
+          </button>
         )}
         {material.category === "pdfs" && (
-          material.cover_url ? (
-            <img src={material.cover_url} alt={material.title} loading="lazy" className="w-full h-full object-cover" />
-          ) : (
-            <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-primary-foreground">
-              <FileText className="h-16 w-16 text-white/90" strokeWidth={1.5} />
-              <span className="text-xs font-medium text-white/90 px-3 truncate max-w-full">{material.file_name}</span>
-            </div>
-          )
+          <a
+            href={url}
+            download={material.file_name ?? undefined}
+            target="_blank"
+            rel="noreferrer"
+            aria-label={`Baixar "${material.title}"`}
+            className="block w-full h-full cursor-pointer"
+          >
+            {material.cover_url ? (
+              <img src={material.cover_url} alt={material.title} loading="lazy" className="w-full h-full object-cover" />
+            ) : (
+              <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-primary-foreground">
+                <FileText className="h-16 w-16 text-white/90" strokeWidth={1.5} />
+                <span className="text-xs font-medium text-white/90 px-3 truncate max-w-full">{material.file_name}</span>
+              </div>
+            )}
+          </a>
         )}
         {material.category === "mensagens" && (
-          <div className="w-full h-full flex items-center justify-center p-4 text-center">
-            <p className="font-display text-lg text-foreground/90 line-clamp-4">"{material.description ?? material.title}"</p>
-          </div>
+          <button
+            type="button"
+            onClick={() => setLightbox(true)}
+            aria-label={`Abrir "${material.title}"`}
+            className="block w-full h-full cursor-pointer"
+          >
+            <div className="w-full h-full flex items-center justify-center p-4 text-center">
+              <p className="font-display text-lg text-foreground/90 line-clamp-4">"{material.description ?? material.title}"</p>
+            </div>
+          </button>
         )}
       </div>
       <div className="p-4 flex-1 flex flex-col">
@@ -91,7 +116,65 @@ export function MaterialCard({ material }: { material: Material }) {
         )}
         {showComments && <Comments materialId={material.id} />}
       </div>
+      {lightbox && (
+        <Lightbox onClose={() => setLightbox(false)}>
+          {material.category === "imagens" ? (
+            <img
+              src={url}
+              alt={material.title}
+              className="max-h-[90vh] max-w-[92vw] object-contain rounded-2xl shadow-2xl"
+            />
+          ) : (
+            <div className="cloud-card bg-card max-w-lg w-[90vw] p-6 sm:p-8 text-center">
+              <p className="font-display text-xl sm:text-2xl leading-snug">
+                "{material.description ?? material.title}"
+              </p>
+              {material.description && (
+                <p className="mt-4 text-sm text-muted-foreground">— {material.title}</p>
+              )}
+            </div>
+          )}
+        </Lightbox>
+      )}
     </div>
+  );
+}
+
+function Lightbox({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [onClose]);
+
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
+    <div
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+    >
+      <button
+        onClick={onClose}
+        aria-label="Fechar"
+        className="absolute top-4 right-4 h-11 w-11 flex items-center justify-center rounded-full bg-white/90 text-foreground hover:bg-white transition shadow-lg"
+      >
+        <X className="h-5 w-5" />
+      </button>
+      <div onClick={(e) => e.stopPropagation()} className="flex items-center justify-center">
+        {children}
+      </div>
+    </div>,
+    document.body
   );
 }
 
