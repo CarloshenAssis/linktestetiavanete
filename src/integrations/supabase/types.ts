@@ -49,6 +49,7 @@ export type Database = {
       materials: {
         Row: {
           category: Database["public"]["Enums"]["material_category"]
+          cover_url: string | null
           created_at: string | null
           description: string | null
           file_name: string | null
@@ -62,6 +63,7 @@ export type Database = {
         }
         Insert: {
           category: Database["public"]["Enums"]["material_category"]
+          cover_url?: string | null
           created_at?: string | null
           description?: string | null
           file_name?: string | null
@@ -75,6 +77,7 @@ export type Database = {
         }
         Update: {
           category?: Database["public"]["Enums"]["material_category"]
+          cover_url?: string | null
           created_at?: string | null
           description?: string | null
           file_name?: string | null

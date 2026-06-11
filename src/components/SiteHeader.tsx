@@ -1,13 +1,41 @@
 import { Link } from "@tanstack/react-router";
 import { Heart } from "lucide-react";
+import { useEffect, useState } from "react";
 import avatar from "@/assets/vanete-avatar.png";
+import { supabase } from "@/integrations/supabase/client";
+import { fetchAvatarUrl } from "@/lib/materials";
 
 export function SiteHeader() {
+  const [avatarUrl, setAvatarUrl] = useState<string>(avatar);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  useEffect(() => {
+    fetchAvatarUrl().then((url) => { if (url) setAvatarUrl(url); });
+
+    async function checkAdmin() {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) { setIsAdmin(false); return; }
+      const { data: roles } = await supabase
+        .from("user_roles")
+        .select("role")
+        .eq("user_id", session.user.id);
+      setIsAdmin((roles ?? []).some((r) => r.role === "admin"));
+    }
+    checkAdmin();
+    const { data: sub } = supabase.auth.onAuthStateChange(() => { checkAdmin(); });
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
   return (
     <header className="sticky top-0 z-40 backdrop-blur-md bg-background/75 border-b border-border/60">
       <div className="mx-auto max-w-6xl px-4 h-16 flex items-center justify-between gap-3">
         <Link to="/" className="flex items-center gap-2 group">
-          <img src={avatar} alt="" className="h-10 w-10 rounded-full ring-2 ring-primary/60 bg-white" />
+          <img src={avatarUrl} alt="" className="h-10 w-10 rounded-full ring-2 ring-primary/60 bg-white object-cover" />
+          {isAdmin && (
+            <span className="px-2 py-0.5 rounded-full bg-pink text-pink-foreground text-[10px] font-bold tracking-wide soft-shadow">
+              ADMIN
+            </span>
+          )}
           <span className="font-display text-base sm:text-lg leading-tight">
             <span className="block">Tia Vanete</span>
             <span className="block text-xs text-muted-foreground -mt-0.5">Maffra</span>

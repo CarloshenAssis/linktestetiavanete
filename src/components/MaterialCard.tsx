@@ -31,10 +31,14 @@ export function MaterialCard({ material }: { material: Material }) {
           <img src={url} alt={material.title} loading="lazy" className="w-full h-full object-cover" />
         )}
         {material.category === "pdfs" && (
-          <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-primary-foreground">
-            <FileText className="h-16 w-16 text-white/90" strokeWidth={1.5} />
-            <span className="text-xs font-medium text-white/90 px-3 truncate max-w-full">{material.file_name}</span>
-          </div>
+          material.cover_url ? (
+            <img src={material.cover_url} alt={material.title} loading="lazy" className="w-full h-full object-cover" />
+          ) : (
+            <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-primary-foreground">
+              <FileText className="h-16 w-16 text-white/90" strokeWidth={1.5} />
+              <span className="text-xs font-medium text-white/90 px-3 truncate max-w-full">{material.file_name}</span>
+            </div>
+          )
         )}
         {material.category === "mensagens" && (
           <div className="w-full h-full flex items-center justify-center p-4 text-center">

@@ -12,9 +12,21 @@ export interface Material {
   file_name: string | null;
   file_size: number | null;
   mime_type: string | null;
+  cover_url: string | null;
   likes_count: number;
   created_at: string;
   signed_url?: string;
+}
+
+export const AVATAR_SETTING_KEY = "avatar_url";
+
+export async function fetchAvatarUrl(): Promise<string | null> {
+  const { data } = await supabase
+    .from("site_settings")
+    .select("value")
+    .eq("key", AVATAR_SETTING_KEY)
+    .maybeSingle();
+  return data?.value ?? null;
 }
 
 const SIGNED_EXPIRES = 60 * 60 * 24 * 7; // 7 days

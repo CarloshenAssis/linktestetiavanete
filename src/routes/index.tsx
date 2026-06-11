@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import avatar from "@/assets/vanete-avatar.png";
 import { MaterialCarousel } from "@/components/MaterialCarousel";
-import { fetchVerse } from "@/lib/materials";
+import { fetchVerse, fetchAvatarUrl } from "@/lib/materials";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -16,9 +16,11 @@ export const Route = createFileRoute("/")({
 
 function Home() {
   const [verse, setVerse] = useState<string>("");
+  const [avatarUrl, setAvatarUrl] = useState<string>(avatar);
 
   useEffect(() => {
     fetchVerse().then(setVerse);
+    fetchAvatarUrl().then((url) => { if (url) setAvatarUrl(url); });
   }, []);
 
   return (
@@ -30,7 +32,7 @@ function Home() {
             <div className="relative">
               <div className="absolute inset-0 rounded-full bg-gradient-to-br from-sky to-pink blur-2xl opacity-60 scale-110" />
               <img
-                src={avatar}
+                src={avatarUrl}
                 alt="Ilustração da Tia Vanete Maffra"
                 width={1024}
                 height={1024}

@@ -2,8 +2,9 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
-import { fetchMaterials, fetchVerse, Material, MaterialCategory } from "@/lib/materials";
-import { Trash2, Upload, LogOut, FileText, ImageIcon, MessageSquare } from "lucide-react";
+import { fetchMaterials, fetchVerse, fetchAvatarUrl, AVATAR_SETTING_KEY, Material, MaterialCategory } from "@/lib/materials";
+import avatarFallback from "@/assets/vanete-avatar.png";
+import { Trash2, Upload, LogOut, FileText, ImageIcon, MessageSquare, Camera } from "lucide-react";
 
 export const Route = createFileRoute("/admin")({
   ssr: false,
@@ -71,6 +72,8 @@ function AdminPanel() {
         </button>
       </header>
 
+      <ProfilePhotoCard />
+
       <div className="cloud-card p-5">
         <h2 className="font-display text-xl mb-3">🌟 Versículo do dia</h2>
         <textarea value={verse} onChange={(e) => setVerse(e.target.value)} rows={3}
@@ -119,19 +122,87 @@ async function deleteMaterial(m: Material, refresh: () => void) {
   if (error) toast.error(error.message); else { toast.success("Excluído"); refresh(); }
 }
 
+function ProfilePhotoCard() {
+  const [url, setUrl] = useState<string>(avatarFallback);
+  const [uploading, setUploading] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    fetchAvatarUrl().then((u) => { if (u) setUrl(u); });
+  }, []);
+
+  async function onPick(f: File | null) {
+    if (!f) return;
+    if (!f.type.startsWith("image/")) { toast.error("Selecione uma imagem"); return; }
+    if (f.size > 10485760) { toast.error("Imagem maior que 10MB"); return; }
+    setUploading(true);
+    try {
+      const ext = f.name.split(".").pop() ?? "png";
+      const path = `avatars/${crypto.randomUUID()}.${ext}`;
+      const { error: upErr } = await supabase.storage.from("materials").upload(path, f, {
+        contentType: f.type, upsert: false,
+      });
+      if (upErr) throw upErr;
+      const { data: pub } = supabase.storage.from("materials").getPublicUrl(path);
+      const { error } = await supabase.from("site_settings").upsert({
+        key: AVATAR_SETTING_KEY, value: pub.publicUrl, updated_at: new Date().toISOString(),
+      });
+      if (error) throw error;
+      setUrl(pub.publicUrl);
+      toast.success("Foto de perfil atualizada! 📸");
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setUploading(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  }
+
+  return (
+    <div className="cloud-card p-5">
+      <h2 className="font-display text-xl mb-3">📸 Foto de perfil</h2>
+      <div className="flex items-center gap-5">
+        <img src={url} alt="Foto de perfil atual" className="h-24 w-24 rounded-full object-cover ring-4 ring-white soft-shadow bg-white" />
+        <div>
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            disabled={uploading}
+            className="inline-flex items-center gap-2 px-5 py-2 rounded-full bg-primary text-primary-foreground font-medium soft-shadow disabled:opacity-50"
+          >
+            <Camera className="h-4 w-4" /> {uploading ? "Enviando..." : "Trocar foto"}
+          </button>
+          <p className="text-xs text-muted-foreground mt-2">Imagem quadrada fica melhor. Até 10MB.</p>
+        </div>
+        <input ref={inputRef} type="file" accept="image/*" className="hidden"
+          onChange={(e) => onPick(e.target.files?.[0] ?? null)} />
+      </div>
+    </div>
+  );
+}
+
 function UploadCard({ onUploaded }: { onUploaded: () => void }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState<MaterialCategory>("mensagens");
   const [file, setFile] = useState<File | null>(null);
+  const [cover, setCover] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const coverRef = useRef<HTMLInputElement>(null);
 
   function onPick(f: File | null) {
     if (!f) return setFile(null);
     if (f.size > 209715200) { toast.error("Arquivo maior que 200MB"); return; }
     setFile(f);
+  }
+
+  function onPickCover(f: File | null) {
+    if (!f) return setCover(null);
+    if (!f.type.startsWith("image/")) { toast.error("A capa deve ser uma imagem"); return; }
+    if (f.size > 10485760) { toast.error("Capa maior que 10MB"); return; }
+    setCover(f);
   }
 
   async function submit(e: React.FormEvent) {
@@ -168,14 +239,28 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
         url = pub.publicUrl;
       }
 
+      let coverUrl: string | null = null;
+      if (category === "pdfs" && cover) {
+        const cext = cover.name.split(".").pop() ?? "png";
+        const coverPath = `pdfs/covers/${crypto.randomUUID()}.${cext}`;
+        const { error: covErr } = await supabase.storage.from("materials").upload(coverPath, cover, {
+          contentType: cover.type, upsert: false,
+        });
+        if (covErr) throw covErr;
+        const { data: covPub } = supabase.storage.from("materials").getPublicUrl(coverPath);
+        coverUrl = covPub.publicUrl;
+      }
+
       const { error } = await supabase.from("materials").insert({
         title, description: description || null, category,
         file_path: path, file_url: url, file_name: name, file_size: size, mime_type: mime,
+        cover_url: coverUrl,
       });
       if (error) throw error;
       toast.success("Material publicado! 🌈");
-      setTitle(""); setDescription(""); setFile(null);
+      setTitle(""); setDescription(""); setFile(null); setCover(null);
       if (inputRef.current) inputRef.current.value = "";
+      if (coverRef.current) coverRef.current.value = "";
       onUploaded();
     } catch (err) {
       toast.error((err as Error).message);
@@ -230,6 +315,27 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
           accept={category === "imagens" ? "image/*" : category === "pdfs" ? "application/pdf" : "*"}
           onChange={(e) => onPick(e.target.files?.[0] ?? null)} />
       </div>
+      {category === "pdfs" && (
+        <div>
+          <label className="text-sm font-medium block mb-1">Capa do PDF (opcional)</label>
+          <div
+            onClick={() => coverRef.current?.click()}
+            className="cursor-pointer rounded-2xl border-2 border-dashed border-border hover:border-primary/60 hover:bg-muted p-4 flex items-center gap-4 transition"
+          >
+            {cover ? (
+              <img src={URL.createObjectURL(cover)} alt="Prévia da capa" className="h-16 w-16 rounded-xl object-cover ring-2 ring-white soft-shadow" />
+            ) : (
+              <ImageIcon className="h-12 w-12 p-2 rounded-xl bg-primary/30 text-primary" />
+            )}
+            <div className="min-w-0">
+              <p className="text-sm font-medium truncate">{cover ? cover.name : "Escolher imagem de capa"}</p>
+              <p className="text-xs text-muted-foreground">Aparece no card do PDF. Até 10MB.</p>
+            </div>
+          </div>
+          <input ref={coverRef} type="file" accept="image/*" className="hidden"
+            onChange={(e) => onPickCover(e.target.files?.[0] ?? null)} />
+        </div>
+      )}
       <button disabled={uploading} className="px-6 py-3 rounded-full bg-primary text-primary-foreground font-medium soft-shadow disabled:opacity-50">
         {uploading ? "Enviando..." : "Publicar"}
       </button>
