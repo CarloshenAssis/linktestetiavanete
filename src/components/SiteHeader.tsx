@@ -87,7 +87,7 @@ export function SiteFooter() {
             <InstagramIcon /> Instagram
           </a>
           <a
-            href="https://facebook.com/"
+            href="https://www.facebook.com/profile.php?id=61556887024240"
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-2 px-5 py-3 rounded-full bg-[#1877F2] text-white font-medium soft-shadow hover:scale-105 transition"
