@@ -3,6 +3,7 @@ import { useEffect, useState, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { fetchMaterials, fetchVerse, fetchAvatarUrl, AVATAR_SETTING_KEY, Material, MaterialCategory } from "@/lib/materials";
+import { compressPdf } from "@/lib/pdfCompress";
 import avatarFallback from "@/assets/vanete-avatar.png";
 import { Trash2, Upload, LogOut, FileText, ImageIcon, MessageSquare, Camera } from "lucide-react";
 
@@ -189,6 +190,7 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
   const [cover, setCover] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [compressing, setCompressing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const coverRef = useRef<HTMLInputElement>(null);
 
@@ -218,17 +220,26 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
       let name = "mensagem.txt";
 
       if (file) {
-        const ext = file.name.split(".").pop() ?? "bin";
+        let toUpload = file;
+        if (category === "pdfs" && file.type === "application/pdf") {
+          setCompressing(true);
+          try {
+            toUpload = await compressPdf(file);
+          } finally {
+            setCompressing(false);
+          }
+        }
+        const ext = toUpload.name.split(".").pop() ?? "bin";
         path = `${category}/${crypto.randomUUID()}.${ext}`;
-        const { error: upErr } = await supabase.storage.from("materials").upload(path, file, {
-          contentType: file.type, upsert: false, cacheControl: "31536000",
+        const { error: upErr } = await supabase.storage.from("materials").upload(path, toUpload, {
+          contentType: toUpload.type, upsert: false, cacheControl: "31536000",
         });
         if (upErr) throw upErr;
         const { data: pub } = supabase.storage.from("materials").getPublicUrl(path);
         url = pub.publicUrl;
-        mime = file.type;
-        size = file.size;
-        name = file.name;
+        mime = toUpload.type;
+        size = toUpload.size;
+        name = toUpload.name;
       } else {
         // pure text message: store description as a tiny txt
         path = `mensagens/${crypto.randomUUID()}.txt`;
@@ -339,7 +350,7 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
         </div>
       )}
       <button disabled={uploading} className="px-6 py-3 rounded-full bg-primary text-primary-foreground font-medium soft-shadow disabled:opacity-50">
-        {uploading ? "Enviando..." : "Publicar"}
+        {compressing ? "Comprimindo PDF..." : uploading ? "Enviando..." : "Publicar"}
       </button>
     </form>
   );
