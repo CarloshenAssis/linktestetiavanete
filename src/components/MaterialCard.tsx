@@ -12,7 +12,7 @@ export function MaterialCard({ material }: { material: Material }) {
   const [showShare, setShowShare] = useState(false);
   const [lightbox, setLightbox] = useState(false);
 
-  const url = material.signed_url ?? material.file_url;
+  const url = material.file_url;
 
   async function handleLike() {
     if (liked) return;
@@ -193,7 +193,9 @@ function Comments({ materialId }: { materialId: string }) {
     setList(data ?? []);
     setLoaded(true);
   }
-  if (!loaded) load();
+  useEffect(() => {
+    if (!loaded) load();
+  }, [loaded]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();

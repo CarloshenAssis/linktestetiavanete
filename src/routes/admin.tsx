@@ -140,7 +140,7 @@ function ProfilePhotoCard() {
       const ext = f.name.split(".").pop() ?? "png";
       const path = `avatars/${crypto.randomUUID()}.${ext}`;
       const { error: upErr } = await supabase.storage.from("materials").upload(path, f, {
-        contentType: f.type, upsert: false,
+        contentType: f.type, upsert: false, cacheControl: "31536000",
       });
       if (upErr) throw upErr;
       const { data: pub } = supabase.storage.from("materials").getPublicUrl(path);
@@ -221,7 +221,7 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
         const ext = file.name.split(".").pop() ?? "bin";
         path = `${category}/${crypto.randomUUID()}.${ext}`;
         const { error: upErr } = await supabase.storage.from("materials").upload(path, file, {
-          contentType: file.type, upsert: false,
+          contentType: file.type, upsert: false, cacheControl: "31536000",
         });
         if (upErr) throw upErr;
         const { data: pub } = supabase.storage.from("materials").getPublicUrl(path);
@@ -233,7 +233,9 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
         // pure text message: store description as a tiny txt
         path = `mensagens/${crypto.randomUUID()}.txt`;
         const blob = new Blob([description || title], { type: "text/plain" });
-        const { error: upErr } = await supabase.storage.from("materials").upload(path, blob);
+        const { error: upErr } = await supabase.storage.from("materials").upload(path, blob, {
+          cacheControl: "31536000",
+        });
         if (upErr) throw upErr;
         const { data: pub } = supabase.storage.from("materials").getPublicUrl(path);
         url = pub.publicUrl;
@@ -244,7 +246,7 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
         const cext = cover.name.split(".").pop() ?? "png";
         const coverPath = `pdfs/covers/${crypto.randomUUID()}.${cext}`;
         const { error: covErr } = await supabase.storage.from("materials").upload(coverPath, cover, {
-          contentType: cover.type, upsert: false,
+          contentType: cover.type, upsert: false, cacheControl: "31536000",
         });
         if (covErr) throw covErr;
         const { data: covPub } = supabase.storage.from("materials").getPublicUrl(coverPath);

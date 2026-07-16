@@ -15,7 +15,6 @@ export interface Material {
   cover_url: string | null;
   likes_count: number;
   created_at: string;
-  signed_url?: string;
 }
 
 export const AVATAR_SETTING_KEY = "avatar_url";
@@ -29,23 +28,13 @@ export async function fetchAvatarUrl(): Promise<string | null> {
   return data?.value ?? null;
 }
 
-const SIGNED_EXPIRES = 60 * 60 * 24 * 7; // 7 days
-
-export async function signMaterials(rows: Material[]): Promise<Material[]> {
-  if (rows.length === 0) return rows;
-  const paths = rows.map((r) => r.file_path);
-  const { data } = await supabase.storage.from("materials").createSignedUrls(paths, SIGNED_EXPIRES);
-  const map = new Map((data ?? []).map((d) => [d.path, d.signedUrl]));
-  return rows.map((r) => ({ ...r, signed_url: map.get(r.file_path) ?? r.file_url }));
-}
-
 export async function fetchMaterials(category?: MaterialCategory, limit?: number) {
   let q = supabase.from("materials").select("*").order("created_at", { ascending: false });
   if (category) q = q.eq("category", category);
   if (limit) q = q.limit(limit);
   const { data, error } = await q;
   if (error) throw error;
-  return signMaterials((data ?? []) as Material[]);
+  return (data ?? []) as Material[];
 }
 
 export async function fetchVerse(): Promise<string> {
