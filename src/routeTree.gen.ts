@@ -9,31 +9,16 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as PdfsRouteImport } from './routes/pdfs'
-import { Route as MensagensRouteImport } from './routes/mensagens'
-import { Route as ImagensRouteImport } from './routes/imagens'
-import { Route as AuthRouteImport } from './routes/auth'
-import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AdminRouteImport } from './routes/admin'
+import { Route as AuthRouteImport } from './routes/auth'
+import { Route as ImagensRouteImport } from './routes/imagens'
+import { Route as MensagensRouteImport } from './routes/mensagens'
+import { Route as PdfsRouteImport } from './routes/pdfs'
 
-const PdfsRoute = PdfsRouteImport.update({
-  id: '/pdfs',
-  path: '/pdfs',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const MensagensRoute = MensagensRouteImport.update({
-  id: '/mensagens',
-  path: '/mensagens',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ImagensRoute = ImagensRouteImport.update({
-  id: '/imagens',
-  path: '/imagens',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AuthRoute = AuthRouteImport.update({
-  id: '/auth',
-  path: '/auth',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AdminRoute = AdminRouteImport.update({
@@ -41,9 +26,24 @@ const AdminRoute = AdminRouteImport.update({
   path: '/admin',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const AuthRoute = AuthRouteImport.update({
+  id: '/auth',
+  path: '/auth',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ImagensRoute = ImagensRouteImport.update({
+  id: '/imagens',
+  path: '/imagens',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MensagensRoute = MensagensRouteImport.update({
+  id: '/mensagens',
+  path: '/mensagens',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PdfsRoute = PdfsRouteImport.update({
+  id: '/pdfs',
+  path: '/pdfs',
   getParentRoute: () => rootRouteImport,
 } as any)
 
@@ -78,13 +78,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to: '/' | '/admin' | '/auth' | '/imagens' | '/mensagens' | '/pdfs'
   id:
-    | '__root__'
-    | '/'
-    | '/admin'
-    | '/auth'
-    | '/imagens'
-    | '/mensagens'
-    | '/pdfs'
+    '__root__' | '/' | '/admin' | '/auth' | '/imagens' | '/mensagens' | '/pdfs'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -98,32 +92,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/pdfs': {
-      id: '/pdfs'
-      path: '/pdfs'
-      fullPath: '/pdfs'
-      preLoaderRoute: typeof PdfsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/mensagens': {
-      id: '/mensagens'
-      path: '/mensagens'
-      fullPath: '/mensagens'
-      preLoaderRoute: typeof MensagensRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/imagens': {
-      id: '/imagens'
-      path: '/imagens'
-      fullPath: '/imagens'
-      preLoaderRoute: typeof ImagensRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/auth': {
-      id: '/auth'
-      path: '/auth'
-      fullPath: '/auth'
-      preLoaderRoute: typeof AuthRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/admin': {
@@ -133,11 +106,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/auth': {
+      id: '/auth'
+      path: '/auth'
+      fullPath: '/auth'
+      preLoaderRoute: typeof AuthRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/imagens': {
+      id: '/imagens'
+      path: '/imagens'
+      fullPath: '/imagens'
+      preLoaderRoute: typeof ImagensRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/mensagens': {
+      id: '/mensagens'
+      path: '/mensagens'
+      fullPath: '/mensagens'
+      preLoaderRoute: typeof MensagensRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/pdfs': {
+      id: '/pdfs'
+      path: '/pdfs'
+      fullPath: '/pdfs'
+      preLoaderRoute: typeof PdfsRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
