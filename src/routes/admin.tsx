@@ -4,6 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { fetchMaterials, fetchVerse, fetchAvatarUrl, AVATAR_SETTING_KEY, Material, MaterialCategory } from "@/lib/materials";
 import { compressPdf } from "@/lib/pdfCompress";
+import { deleteFromR2, FILE_TOO_LARGE_MESSAGE, MAX_UPLOAD_BYTES, r2KeyFromPublicUrl, uploadToR2 } from "@/lib/files";
 import avatarFallback from "@/assets/vanete-avatar.png";
 import { Trash2, Upload, LogOut, FileText, ImageIcon, MessageSquare, Camera } from "lucide-react";
 
@@ -118,9 +119,16 @@ function CategoryIcon({ c }: { c: MaterialCategory }) {
 
 async function deleteMaterial(m: Material, refresh: () => void) {
   if (!confirm(`Excluir "${m.title}"?`)) return;
-  await supabase.storage.from("materials").remove([m.file_path]);
-  const { error } = await supabase.from("materials").delete().eq("id", m.id);
-  if (error) toast.error(error.message); else { toast.success("Excluído"); refresh(); }
+  try {
+    const fileKey = r2KeyFromPublicUrl(m.file_path) ?? m.file_path;
+    await deleteFromR2(fileKey);
+    const coverKey = r2KeyFromPublicUrl(m.cover_url);
+    if (coverKey && coverKey !== fileKey) await deleteFromR2(coverKey);
+    const { error } = await supabase.from("materials").delete().eq("id", m.id);
+    if (error) toast.error(error.message); else { toast.success("Excluído"); refresh(); }
+  } catch (err) {
+    toast.error((err as Error).message);
+  }
 }
 
 function ProfilePhotoCard() {
@@ -140,16 +148,18 @@ function ProfilePhotoCard() {
     try {
       const ext = f.name.split(".").pop() ?? "png";
       const path = `avatars/${crypto.randomUUID()}.${ext}`;
-      const { error: upErr } = await supabase.storage.from("materials").upload(path, f, {
-        contentType: f.type, upsert: false, cacheControl: "31536000",
-      });
-      if (upErr) throw upErr;
-      const { data: pub } = supabase.storage.from("materials").getPublicUrl(path);
+      const stored = await uploadToR2(path, f, f.type || "image/png");
+      const previousUrl = await fetchAvatarUrl();
       const { error } = await supabase.from("site_settings").upsert({
-        key: AVATAR_SETTING_KEY, value: pub.publicUrl, updated_at: new Date().toISOString(),
+        key: AVATAR_SETTING_KEY, value: stored.url, updated_at: new Date().toISOString(),
       });
-      if (error) throw error;
-      setUrl(pub.publicUrl);
+      if (error) {
+        await deleteFromR2(stored.path).catch(() => {});
+        throw error;
+      }
+      const previous = r2KeyFromPublicUrl(previousUrl);
+      if (previous && previous !== stored.path) await deleteFromR2(previous).catch(() => {});
+      setUrl(stored.url);
       toast.success("Foto de perfil atualizada! 📸");
     } catch (err) {
       toast.error((err as Error).message);
@@ -196,7 +206,7 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
 
   function onPick(f: File | null) {
     if (!f) return setFile(null);
-    if (f.size > 209715200) { toast.error("Arquivo maior que 200MB"); return; }
+    if (f.size > MAX_UPLOAD_BYTES) { toast.error(FILE_TOO_LARGE_MESSAGE); return; }
     setFile(f);
   }
 
@@ -212,6 +222,8 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
     if (!title.trim()) return toast.error("Coloque um título");
     if (category !== "mensagens" && !file) return toast.error("Selecione um arquivo");
     setUploading(true);
+    const uploadedPaths: string[] = [];
+    let published = false;
     try {
       let path = "";
       let url = "";
@@ -229,39 +241,37 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
             setCompressing(false);
           }
         }
+        if (toUpload.size > MAX_UPLOAD_BYTES) {
+          toast.error(FILE_TOO_LARGE_MESSAGE);
+          return;
+        }
         const ext = toUpload.name.split(".").pop() ?? "bin";
         path = `${category}/${crypto.randomUUID()}.${ext}`;
-        const { error: upErr } = await supabase.storage.from("materials").upload(path, toUpload, {
-          contentType: toUpload.type, upsert: false, cacheControl: "31536000",
-        });
-        if (upErr) throw upErr;
-        const { data: pub } = supabase.storage.from("materials").getPublicUrl(path);
-        url = pub.publicUrl;
-        mime = toUpload.type;
-        size = toUpload.size;
+        const stored = await uploadToR2(path, toUpload, toUpload.type || "application/octet-stream");
+        uploadedPaths.push(stored.path);
+        path = stored.path;
+        url = stored.url;
+        mime = toUpload.type || "application/octet-stream";
+        size = stored.size;
         name = toUpload.name;
       } else {
         // pure text message: store description as a tiny txt
         path = `mensagens/${crypto.randomUUID()}.txt`;
         const blob = new Blob([description || title], { type: "text/plain" });
-        const { error: upErr } = await supabase.storage.from("materials").upload(path, blob, {
-          cacheControl: "31536000",
-        });
-        if (upErr) throw upErr;
-        const { data: pub } = supabase.storage.from("materials").getPublicUrl(path);
-        url = pub.publicUrl;
+        const stored = await uploadToR2(path, blob, "text/plain");
+        uploadedPaths.push(stored.path);
+        path = stored.path;
+        url = stored.url;
+        size = stored.size;
       }
 
       let coverUrl: string | null = null;
       if (category === "pdfs" && cover) {
         const cext = cover.name.split(".").pop() ?? "png";
         const coverPath = `pdfs/covers/${crypto.randomUUID()}.${cext}`;
-        const { error: covErr } = await supabase.storage.from("materials").upload(coverPath, cover, {
-          contentType: cover.type, upsert: false, cacheControl: "31536000",
-        });
-        if (covErr) throw covErr;
-        const { data: covPub } = supabase.storage.from("materials").getPublicUrl(coverPath);
-        coverUrl = covPub.publicUrl;
+        const stored = await uploadToR2(coverPath, cover, cover.type || "image/png");
+        uploadedPaths.push(stored.path);
+        coverUrl = stored.url;
       }
 
       const { error } = await supabase.from("materials").insert({
@@ -270,12 +280,16 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
         cover_url: coverUrl,
       });
       if (error) throw error;
+      published = true;
       toast.success("Material publicado! 🌈");
       setTitle(""); setDescription(""); setFile(null); setCover(null);
       if (inputRef.current) inputRef.current.value = "";
       if (coverRef.current) coverRef.current.value = "";
       onUploaded();
     } catch (err) {
+      if (!published) {
+        await Promise.all(uploadedPaths.map((p) => deleteFromR2(p).catch(() => {})));
+      }
       toast.error((err as Error).message);
     } finally {
       setUploading(false);
@@ -321,7 +335,7 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
         ) : (
           <>
             <p className="font-medium">Arraste o arquivo aqui ou clique para selecionar</p>
-            <p className="text-xs text-muted-foreground mt-1">Imagens, PDFs ou textos. Até 200MB.</p>
+            <p className="text-xs text-muted-foreground mt-1">Imagens, PDFs ou textos. Até 95 MB.</p>
           </>
         )}
         <input ref={inputRef} type="file" className="hidden"
