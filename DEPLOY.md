@@ -7,7 +7,7 @@ painel do Supabase nem ao da Vercel).
 
 ---
 
-## Passo 1 — Criar as tabelas e o storage no Supabase
+## Passo 1 — Criar as tabelas no Supabase
 
 1. Abra o **SQL Editor** do seu projeto:
    https://supabase.com/dashboard/project/ixoiwfqsyetyrivxrmbe/sql/new
@@ -20,10 +20,10 @@ Isso cria tudo de uma vez (pode rodar de novo sem problema):
 - Tabelas: `user_roles`, `site_settings`, `materials`, `comments`
 - Função que torna **o primeiro cadastro automaticamente admin** (a Tia Vanete)
 - Função de curtir sem login (`like_material`)
-- **Bucket de storage `materials`** (público, até 200 MB) + permissões de upload só para admin
 
-✔️ Confira em **Storage** que apareceu o bucket `materials`:
-https://supabase.com/dashboard/project/ixoiwfqsyetyrivxrmbe/storage/buckets
+O script ainda cria o bucket antigo `materials` no Supabase Storage. **O site não
+usa mais esse bucket:** leitura vem das URLs já salvas no banco, e o painel envia
+e apaga arquivos no Cloudflare R2 (veja **Arquivos (R2)** no passo 3).
 
 ---
 
@@ -38,6 +38,7 @@ conseguir entrar logo após criar a conta:
 (Se preferir manter ligado, é só confirmar pelo e-mail que chega após o cadastro.)
 
 ### Criar a conta de admin
+
 - Rode o site (Passo 3) e acesse **`/auth`**.
 - Clique em **"Primeiro acesso? Criar conta"**, use o **e-mail e senha** da Tia
   Vanete e crie a conta.
@@ -57,16 +58,34 @@ O jeito mais simples e gratuito é conectar o repositório do GitHub:
    - **Build Command:** `npm run build`
    - **Install Command:** `npm install`
    - **Framework Preset:** Other
-4. (Opcional, recomendado) Em **Settings → Environment Variables**, adicione as
-   mesmas chaves do `.env`:
+4. Em **Settings → Environment Variables**, adicione as mesmas chaves do `.env`
+   (o modelo está em [`.env.example`](.env.example)):
    `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_URL`,
-   `SUPABASE_PUBLISHABLE_KEY` (a chave **anon** é pública, pode usar à vontade).
+   `SUPABASE_PUBLISHABLE_KEY` (a chave **anon** é pública, pode usar à vontade) e
+   `VITE_FILES_WORKER_URL`.
 5. Clique em **Deploy**.
+
+### Arquivos (R2)
+
+Os arquivos publicados (PDF, imagem, texto, capa e foto de perfil) ficam no
+bucket R2 `tiavanete-materials`. O painel admin grava e apaga pela variável:
+
+```bash
+VITE_FILES_WORKER_URL=https://tiavanete-files.carloshen.workers.dev
+```
+
+É uma URL pública (não é segredo). Se a variável não estiver definida, o site
+usa esse mesmo endereço. O Worker só aceita upload e exclusão com o token da
+sessão Supabase de um admin (`Authorization: Bearer …`). Cada arquivo pode ter
+no máximo **95 MB** (o plano gratuito do Worker recusa corpos acima de 100 MB).
+Quem visita o site só lê `file_url` / `cover_url` / `avatar_url` já gravados no
+banco — login e tabelas continuam no Supabase.
 
 > Já enviei a configuração do Nitro para o preset **vercel**, então o build gera
 > `.vercel/output` e a Vercel serve o site (SSR) automaticamente.
 
 ### Alternativa por linha de comando
+
 ```bash
 npm i -g vercel
 vercel login
@@ -76,6 +95,7 @@ vercel --prod
 ---
 
 ## Depois de publicar
+
 - Pegue a URL da Vercel (ex.: `https://linktestetiavanete.vercel.app`).
 - No Supabase **Auth → URL Configuration**, adicione essa URL em **Site URL** e
   **Redirect URLs** para o login funcionar 100%:
