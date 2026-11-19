@@ -677,12 +677,23 @@ async function googleStatus(req, env) {
   });
 }
 
+
+// Workers reject the Fetch "error" redirect mode. Use "manual" and treat
+// 3xx as a failure so a redirect cannot consume a one-shot upload body.
+async function fetchWithoutRedirect(request, url, options = {}) {
+  const response = await request(url, { ...options, redirect: "manual" });
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel();
+    throw new Error(`Unexpected redirect: ${response.status}`);
+  }
+  return response;
+}
+
 function driveClient(token, request = fetch) {
   return (url, options = {}) =>
-    request(url, {
+    fetchWithoutRedirect(request, url, {
       ...options,
       headers: { Authorization: `Bearer ${token}`, ...options.headers },
-      redirect: "error",
     });
 }
 
@@ -1068,7 +1079,7 @@ async function runBackup(env, { budget, scheduled = false }) {
   const request = (url, options) => {
     if (available <= 0) throw new Error("Limite de chamadas do backup atingido.");
     available--;
-    return fetch(url, { ...options, redirect: "error", signal });
+    return fetchWithoutRedirect(fetch, url, { ...options, signal });
   };
 
   try {
@@ -1282,7 +1293,7 @@ async function sendGmailAlert(env, sender, mail) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ raw: base64Url(mimeMessage({ ...mail, from: alertSenderEmail(env) })) }),
-    redirect: "error",
+    redirect: "manual",
     signal: AbortSignal.timeout(15_000),
   });
   await response.body?.cancel();
@@ -1290,6 +1301,7 @@ async function sendGmailAlert(env, sender, mail) {
     await markSenderReauth(env, sender);
     return "failed";
   }
+  if (response.status >= 300 && response.status < 400) return "failed";
   return response.ok ? "sent" : "failed";
 }
 

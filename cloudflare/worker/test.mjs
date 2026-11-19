@@ -137,7 +137,8 @@ function fixture(t, files = [], options = {}) {
     const url = new URL(input);
     const method = init.method ?? "GET";
     const headers = new Headers(init.headers);
-    calls.push({ url, method, headers });
+    if (init.redirect === "error") assert.fail("Workers não aceitam redirect: \"error\"");
+    calls.push({ url, method, headers, redirect: init.redirect });
     if (url.href === GMAIL_SEND) {
       const { raw } = JSON.parse(init.body);
       assert.match(raw, /^[A-Za-z0-9_-]+$/);
@@ -179,6 +180,12 @@ function fixture(t, files = [], options = {}) {
           : Response.json({ access_token: "sender-access", expires_in: 3600 });
       }
       assert.equal(init.body.get("refresh_token"), "offline-token");
+      if (options.tokenRedirect) {
+        return new Response(null, {
+          status: options.tokenRedirect,
+          headers: { Location: "https://example.com/redirect" },
+        });
+      }
       if (options.tokenStatus) return new Response(null, { status: options.tokenStatus });
       return options.invalidGrant
         ? Response.json({ error: "invalid_grant" }, { status: 400 })
@@ -580,6 +587,7 @@ test("backup copies only new and changed keys, files by material, and respects t
   assert.equal(first.failed, 0);
   assert.equal(first.copied + first.remaining, files.length - 1);
   assert.ok(f.calls.length <= 40, `Chamadas externas: ${f.calls.length}`);
+  assert.ok(f.calls.some(({ url, redirect }) => url.host.endsWith("googleapis.com") && redirect === "manual"));
   assert.equal(f.calls.filter(({ url }) => url.pathname === "/rest/v1/materials").length, 1);
   assert.deepEqual(
     f.copies.slice(0, 3).map(({ name }) => name),
@@ -639,6 +647,22 @@ test("backup logs and tracks failures without marking the key as copied", async 
   assert.equal(f.data.has("backup:erro.txt"), false);
   assert.equal(f.data.has("backup:ok.txt"), true);
   assert.equal(console.error.mock.callCount(), 1);
+});
+
+test("backup treats a Google 3xx as a failed run instead of following the redirect", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const f = fixture(t, [["a.txt", 3]], { tokenRedirect: 302 });
+  await f.connect();
+  const response = await f.request("/backup/run", { method: "POST" });
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error, "google_drive_error");
+  const last = await f.env.STATE.get("backup:last", "json");
+  assert.equal(last.copied, 0);
+  assert.equal(last.failed, 0);
+  assert.equal(last.remaining, 1);
+  assert.equal(last.health.failedRuns, 1);
+  assert.equal(f.copies.length, 0);
+  assert.ok(f.calls.some(({ url, redirect }) => url.host === "oauth2.googleapis.com" && redirect === "manual"));
 });
 
 test("backup streams a 200 MiB R2 object in one Drive PUT", async (t) => {
