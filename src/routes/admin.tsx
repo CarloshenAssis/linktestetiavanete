@@ -1,10 +1,38 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
-import { fetchMaterials, fetchVerse, fetchAvatarUrl, AVATAR_SETTING_KEY, Material, MaterialCategory } from "@/lib/materials";
+import {
+  fetchMaterials,
+  fetchVerse,
+  fetchAvatarUrl,
+  AVATAR_SETTING_KEY,
+  MATERIAL_CATEGORY_LABELS,
+  Material,
+  MaterialCategory,
+} from "@/lib/materials";
 import { compressPdf } from "@/lib/pdfCompress";
-import { deleteFromR2, FILE_TOO_LARGE_MESSAGE, MAX_UPLOAD_BYTES, r2KeyFromPublicUrl, uploadToR2 } from "@/lib/files";
+import {
+  checkStorageSpace,
+  deleteFromR2,
+  fetchStorageUsage,
+  FILE_TOO_LARGE_MESSAGE,
+  formatBytes,
+  MAX_UPLOAD_BYTES,
+  onStorageUsageChange,
+  r2KeyFromPublicUrl,
+  uploadToR2,
+  type StorageUsage,
+} from "@/lib/files";
+import {
+  driveAuthUrl,
+  DRIVE_NEEDS_REAUTH,
+  DRIVE_NOT_CONNECTED,
+  fetchDriveStatus,
+  runDriveBackup,
+  type DriveStatus,
+} from "@/lib/drive";
+import { AdminOnly } from "@/components/AdminOnly";
 import avatarFallback from "@/assets/vanete-avatar.png";
 import { Trash2, Upload, LogOut, FileText, ImageIcon, MessageSquare, Camera } from "lucide-react";
 
@@ -15,30 +43,209 @@ export const Route = createFileRoute("/admin")({
 });
 
 function Admin() {
-  const navigate = useNavigate();
-  const [ready, setReady] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
+  return (
+    <AdminOnly>
+      <AdminPanel />
+    </AdminOnly>
+  );
+}
+
+function StorageCard() {
+  const [usage, setUsage] = useState<StorageUsage | null>();
+  useEffect(() => {
+    let controller: AbortController;
+    function refresh(fresh = false) {
+      controller?.abort();
+      controller = new AbortController();
+      const { signal } = controller;
+      void fetchStorageUsage(signal, fresh).then(
+        (result) => {
+          if (!signal.aborted) setUsage(result);
+        },
+        () => {
+          if (!signal.aborted) setUsage(null);
+        },
+      );
+    }
+    const unsubscribe = onStorageUsageChange(() => refresh(true));
+    refresh();
+    return () => {
+      unsubscribe();
+      controller.abort();
+    };
+  }, []);
+
+  const percent = usage ? Math.min(100, (usage.usedBytes / usage.limitBytes) * 100) : 0;
+  const color =
+    percent > 90 ? "accent-red-700" : percent >= 70 ? "accent-amber-600" : "accent-green-700";
+  return (
+    <section className="cloud-card space-y-3 p-5 text-xl" aria-labelledby="storage-heading">
+      <h2 id="storage-heading" className="font-display text-2xl">
+        Espaço do site
+      </h2>
+      {usage ? (
+        <>
+          <p className="font-semibold">
+            {formatBytes(usage.usedBytes, "MB")} de {formatBytes(usage.limitBytes, "MB")} usados
+          </p>
+          <progress
+            aria-label="Espaço do site usado"
+            className={`block h-6 w-full overflow-hidden rounded-full ${color}`}
+            value={percent}
+            max={100}
+          />
+          <p role="status">Ainda cabem {formatBytes(usage.freeBytes, "MB")}</p>
+        </>
+      ) : (
+        <p role="status">
+          {usage === null ? "Não foi possível ver o espaço agora." : "Vendo o espaço do site..."}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function DriveStatusCard() {
+  const [status, setStatus] = useState<DriveStatus | null>();
+  const [running, setRunning] = useState(false);
 
   useEffect(() => {
-    (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) { navigate({ to: "/auth" }); return; }
-      const { data: roles } = await supabase.from("user_roles").select("role").eq("user_id", session.user.id);
-      const admin = (roles ?? []).some((r) => r.role === "admin");
-      setIsAdmin(admin);
-      setReady(true);
-    })();
-  }, [navigate]);
+    let active = true;
+    let request = 0;
+    function refresh() {
+      const current = ++request;
+      void fetchDriveStatus().then(
+        (result) => {
+          if (active && current === request) setStatus(result);
+        },
+        () => {
+          if (active && current === request) setStatus(null);
+        },
+      );
+    }
+    window.addEventListener("focus", refresh);
+    refresh();
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refresh);
+    };
+  }, []);
 
-  if (!ready) return <div className="py-20 text-center text-muted-foreground">Carregando...</div>;
-  if (!isAdmin) return (
-    <div className="py-20 text-center">
-      <p className="text-muted-foreground">Sua conta não tem permissão de administrador.</p>
-      <button onClick={async () => { await supabase.auth.signOut(); navigate({ to: "/auth" }); }} className="mt-4 px-4 py-2 rounded-full bg-primary text-primary-foreground">Sair</button>
-    </div>
+  async function backupNow() {
+    setRunning(true);
+    try {
+      const lastBackup = await runDriveBackup();
+      setStatus((previous) => previous && { ...previous, lastBackup });
+    } catch (error) {
+      toast.error((error as Error).message);
+    } finally {
+      void fetchDriveStatus().then(setStatus, () => {});
+      setRunning(false);
+    }
+  }
+
+  const last = status?.lastBackup;
+  const health = status?.health;
+  const warning = health && health.status !== "ok" ? health : null;
+  const alertEmail = status?.alertEmail;
+  const buttonClass =
+    "inline-flex w-fit items-center justify-center rounded-full bg-sky-800 px-5 py-3 text-lg font-semibold text-white hover:bg-sky-900 disabled:opacity-60";
+  return (
+    <section
+      className="cloud-card flex flex-col items-start gap-3 p-5 text-lg"
+      aria-labelledby="drive-heading"
+    >
+      <h2 id="drive-heading" className="font-display text-2xl">
+        Cópia no Google Drive
+      </h2>
+      {warning && (
+        <div
+          role="alert"
+          className="w-full space-y-3 rounded-xl border-2 border-red-800 bg-red-50 p-5 text-xl text-red-950"
+        >
+          <p className="text-2xl font-bold">{warning.message}</p>
+          <p>{warning.action}</p>
+          {warning.problem === "google_needs_reauth" && (
+            <a
+              href={warning.actionUrl || driveAuthUrl()}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex rounded-xl bg-red-800 px-5 py-4 text-xl font-bold text-white hover:bg-red-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-900"
+            >
+              Ligar o Google Drive de novo
+            </a>
+          )}
+        </div>
+      )}
+      {status?.connected ? (
+        <>
+          <p>Google Drive ligado.</p>
+          {last ? (
+            <div role="status">
+              <p>
+                Último backup em{" "}
+                {new Intl.DateTimeFormat("pt-BR", {
+                  dateStyle: "short",
+                  timeStyle: "short",
+                  timeZone: "America/Sao_Paulo",
+                }).format(new Date(last.at))}
+                .
+              </p>
+              <p>
+                Arquivos copiados: {last.copied}. Com falha: {last.failed}. Faltam: {last.remaining}
+                .
+              </p>
+            </div>
+          ) : (
+            <p>A primeira cópia ainda está por fazer.</p>
+          )}
+          <button type="button" onClick={backupNow} disabled={running} className={buttonClass}>
+            {running ? "Fazendo backup..." : "Fazer backup agora"}
+          </button>
+        </>
+      ) : warning?.problem === "google_needs_reauth" ? null : (
+        <p role="status">
+          {status === undefined
+            ? "Vendo a ligação com o Google Drive..."
+            : status === null
+              ? "Não foi possível ver o Google Drive agora."
+              : status.needsReauth
+                ? DRIVE_NEEDS_REAUTH
+                : DRIVE_NOT_CONNECTED}
+        </p>
+      )}
+      {status?.configured && !status.connected && warning?.problem !== "google_needs_reauth" && (
+        <a href={driveAuthUrl()} target="_blank" rel="noreferrer" className={buttonClass}>
+          Ligar o Google Drive
+        </a>
+      )}
+      {status?.configured && alertEmail && !alertEmail.enabled && (
+        <div
+          role="status"
+          className="w-full space-y-2 rounded-xl border-2 border-amber-700 bg-amber-50 p-4 text-amber-950"
+        >
+          <p className="text-xl font-bold">Aviso por e-mail desligado</p>
+          <p>
+            {alertEmail.needsReauth
+              ? `O Gmail ${alertEmail.sender} perdeu a permissão de enviar os avisos. O Carlos precisa ligar de novo.`
+              : `O Carlos ainda precisa ligar o Gmail ${alertEmail.sender}, que envia os avisos da cópia.`}{" "}
+            Os avisos continuam aparecendo aqui no painel.
+          </p>
+          <a
+            href={alertEmail.authUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex font-semibold text-amber-900 underline"
+          >
+            Ligar o aviso por e-mail (só para o Carlos)
+          </a>
+        </div>
+      )}
+      <Link to="/enviar-drive" className={buttonClass}>
+        📁 Guardar arquivos no meu Google Drive
+      </Link>
+    </section>
   );
-
-  return <AdminPanel />;
 }
 
 function AdminPanel() {
@@ -74,6 +281,8 @@ function AdminPanel() {
         </button>
       </header>
 
+      <StorageCard />
+      <DriveStatusCard />
       <ProfilePhotoCard />
 
       <div className="cloud-card p-5">
@@ -206,14 +415,23 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
 
   function onPick(f: File | null) {
     if (!f) return setFile(null);
-    if (f.size > MAX_UPLOAD_BYTES) { toast.error(FILE_TOO_LARGE_MESSAGE); return; }
+    if (f.size > MAX_UPLOAD_BYTES) {
+      toast.error(FILE_TOO_LARGE_MESSAGE);
+      return;
+    }
     setFile(f);
   }
 
   function onPickCover(f: File | null) {
     if (!f) return setCover(null);
-    if (!f.type.startsWith("image/")) { toast.error("A capa deve ser uma imagem"); return; }
-    if (f.size > 10485760) { toast.error("Capa maior que 10MB"); return; }
+    if (!f.type.startsWith("image/")) {
+      toast.error("A capa deve ser uma imagem");
+      return;
+    }
+    if (f.size > 10485760) {
+      toast.error("Capa maior que 10MB");
+      return;
+    }
     setCover(f);
   }
 
@@ -225,64 +443,54 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
     const uploadedPaths: string[] = [];
     let published = false;
     try {
-      let path = "";
-      let url = "";
-      let mime = "text/plain";
-      let size = 0;
-      let name = "mensagem.txt";
-
-      if (file) {
-        let toUpload = file;
-        if (category === "pdfs" && file.type === "application/pdf") {
-          setCompressing(true);
-          try {
-            toUpload = await compressPdf(file);
-          } finally {
-            setCompressing(false);
-          }
+      let toUpload = file;
+      if (toUpload?.type === "application/pdf" && category === "pdfs") {
+        setCompressing(true);
+        try {
+          toUpload = await compressPdf(toUpload);
+        } finally {
+          setCompressing(false);
         }
-        if (toUpload.size > MAX_UPLOAD_BYTES) {
-          toast.error(FILE_TOO_LARGE_MESSAGE);
-          return;
-        }
-        const ext = toUpload.name.split(".").pop() ?? "bin";
-        path = `${category}/${crypto.randomUUID()}.${ext}`;
-        const stored = await uploadToR2(path, toUpload, toUpload.type || "application/octet-stream");
-        uploadedPaths.push(stored.path);
-        path = stored.path;
-        url = stored.url;
-        mime = toUpload.type || "application/octet-stream";
-        size = stored.size;
-        name = toUpload.name;
-      } else {
-        // pure text message: store description as a tiny txt
-        path = `mensagens/${crypto.randomUUID()}.txt`;
-        const blob = new Blob([description || title], { type: "text/plain" });
-        const stored = await uploadToR2(path, blob, "text/plain");
-        uploadedPaths.push(stored.path);
-        path = stored.path;
-        url = stored.url;
-        size = stored.size;
       }
+      if (toUpload && toUpload.size > MAX_UPLOAD_BYTES) {
+        toast.error(FILE_TOO_LARGE_MESSAGE);
+        return;
+      }
+      const body = toUpload ?? new Blob([description || title], { type: "text/plain" });
+      const pdfCover = category === "pdfs" ? cover : null;
+      if (pdfCover) await checkStorageSpace(body.size + pdfCover.size);
+      const ext = toUpload ? (toUpload.name.split(".").pop() ?? "bin") : "txt";
+      const mime = body.type || "application/octet-stream";
+      const stored = await uploadToR2(`${category}/${crypto.randomUUID()}.${ext}`, body, mime);
+      uploadedPaths.push(stored.path);
 
       let coverUrl: string | null = null;
-      if (category === "pdfs" && cover) {
-        const cext = cover.name.split(".").pop() ?? "png";
+      if (pdfCover) {
+        const cext = pdfCover.name.split(".").pop() ?? "png";
         const coverPath = `pdfs/covers/${crypto.randomUUID()}.${cext}`;
-        const stored = await uploadToR2(coverPath, cover, cover.type || "image/png");
+        const stored = await uploadToR2(coverPath, pdfCover, pdfCover.type || "image/png");
         uploadedPaths.push(stored.path);
         coverUrl = stored.url;
       }
 
       const { error } = await supabase.from("materials").insert({
-        title, description: description || null, category,
-        file_path: path, file_url: url, file_name: name, file_size: size, mime_type: mime,
+        title,
+        description: description || null,
+        category,
+        file_path: stored.path,
+        file_url: stored.url,
+        file_name: toUpload?.name ?? "mensagem.txt",
+        file_size: stored.size,
+        mime_type: mime,
         cover_url: coverUrl,
       });
       if (error) throw error;
       published = true;
       toast.success("Material publicado! 🌈");
-      setTitle(""); setDescription(""); setFile(null); setCover(null);
+      setTitle("");
+      setDescription("");
+      setFile(null);
+      setCover(null);
       if (inputRef.current) inputRef.current.value = "";
       if (coverRef.current) coverRef.current.value = "";
       onUploaded();
@@ -309,9 +517,9 @@ function UploadCard({ onUploaded }: { onUploaded: () => void }) {
           <label className="text-sm font-medium block mb-1">Categoria</label>
           <select value={category} onChange={(e) => setCategory(e.target.value as MaterialCategory)}
             className="w-full px-4 py-3 rounded-2xl border border-input bg-background">
-            <option value="mensagens">Mensagens</option>
-            <option value="imagens">Imagens</option>
-            <option value="pdfs">PDFs</option>
+            <option value="mensagens">{MATERIAL_CATEGORY_LABELS.mensagens}</option>
+            <option value="imagens">{MATERIAL_CATEGORY_LABELS.imagens}</option>
+            <option value="pdfs">{MATERIAL_CATEGORY_LABELS.pdfs}</option>
           </select>
         </div>
       </div>

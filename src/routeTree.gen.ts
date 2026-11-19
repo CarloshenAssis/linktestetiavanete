@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as AuthRouteImport } from './routes/auth'
+import { Route as EnviarDriveRouteImport } from './routes/enviar-drive'
 import { Route as ImagensRouteImport } from './routes/imagens'
 import { Route as MensagensRouteImport } from './routes/mensagens'
 import { Route as PdfsRouteImport } from './routes/pdfs'
@@ -29,6 +30,11 @@ const AdminRoute = AdminRouteImport.update({
 const AuthRoute = AuthRouteImport.update({
   id: '/auth',
   path: '/auth',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EnviarDriveRoute = EnviarDriveRouteImport.update({
+  id: '/enviar-drive',
+  path: '/enviar-drive',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ImagensRoute = ImagensRouteImport.update({
@@ -51,6 +57,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/auth': typeof AuthRoute
+  '/enviar-drive': typeof EnviarDriveRoute
   '/imagens': typeof ImagensRoute
   '/mensagens': typeof MensagensRoute
   '/pdfs': typeof PdfsRoute
@@ -59,6 +66,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/auth': typeof AuthRoute
+  '/enviar-drive': typeof EnviarDriveRoute
   '/imagens': typeof ImagensRoute
   '/mensagens': typeof MensagensRoute
   '/pdfs': typeof PdfsRoute
@@ -68,23 +76,46 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/auth': typeof AuthRoute
+  '/enviar-drive': typeof EnviarDriveRoute
   '/imagens': typeof ImagensRoute
   '/mensagens': typeof MensagensRoute
   '/pdfs': typeof PdfsRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/admin' | '/auth' | '/imagens' | '/mensagens' | '/pdfs'
+  fullPaths:
+    | '/'
+    | '/admin'
+    | '/auth'
+    | '/enviar-drive'
+    | '/imagens'
+    | '/mensagens'
+    | '/pdfs'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/admin' | '/auth' | '/imagens' | '/mensagens' | '/pdfs'
+  to:
+    | '/'
+    | '/admin'
+    | '/auth'
+    | '/enviar-drive'
+    | '/imagens'
+    | '/mensagens'
+    | '/pdfs'
   id:
-    '__root__' | '/' | '/admin' | '/auth' | '/imagens' | '/mensagens' | '/pdfs'
+    | '__root__'
+    | '/'
+    | '/admin'
+    | '/auth'
+    | '/enviar-drive'
+    | '/imagens'
+    | '/mensagens'
+    | '/pdfs'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRoute
   AuthRoute: typeof AuthRoute
+  EnviarDriveRoute: typeof EnviarDriveRoute
   ImagensRoute: typeof ImagensRoute
   MensagensRoute: typeof MensagensRoute
   PdfsRoute: typeof PdfsRoute
@@ -111,6 +142,13 @@ declare module '@tanstack/react-router' {
       path: '/auth'
       fullPath: '/auth'
       preLoaderRoute: typeof AuthRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/enviar-drive': {
+      id: '/enviar-drive'
+      path: '/enviar-drive'
+      fullPath: '/enviar-drive'
+      preLoaderRoute: typeof EnviarDriveRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/imagens': {
@@ -141,6 +179,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
   AuthRoute: AuthRoute,
+  EnviarDriveRoute: EnviarDriveRoute,
   ImagensRoute: ImagensRoute,
   MensagensRoute: MensagensRoute,
   PdfsRoute: PdfsRoute,

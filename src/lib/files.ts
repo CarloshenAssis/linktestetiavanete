@@ -12,6 +12,35 @@ const R2_PUBLIC_HOST = "pub-e9be11aeab4a431e8dc85a854ae160fe.r2.dev";
 export const MAX_UPLOAD_BYTES = 95 * 1024 * 1024;
 
 export const FILE_TOO_LARGE_MESSAGE = "Arquivo maior que 95 MB. O envio aceita no máximo 95 MB.";
+export const STORAGE_FULL_MESSAGE =
+  "O espaço do site acabou (limite de 5 GB). Apague materiais antigos ou fale com o Carlos antes de enviar mais.";
+
+export interface StorageUsage {
+  usedBytes: number;
+  limitBytes: number;
+  objectCount: number;
+  freeBytes: number;
+}
+
+const usageEvents = new EventTarget();
+
+export function onStorageUsageChange(refresh: () => void) {
+  usageEvents.addEventListener("change", refresh);
+  return () => usageEvents.removeEventListener("change", refresh);
+}
+
+function storageUsageChanged() {
+  usageEvents.dispatchEvent(new Event("change"));
+}
+
+const decimal = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 });
+
+export function formatBytes(bytes: number, minimumUnit: "B" | "MB" = "B"): string {
+  if (bytes >= 1024 ** 3) return `${decimal.format(bytes / 1024 ** 3)} GB`;
+  if (bytes >= 1024 ** 2 || minimumUnit === "MB") return `${decimal.format(bytes / 1024 ** 2)} MB`;
+  if (bytes >= 1024) return `${decimal.format(bytes / 1024)} KB`;
+  return `${decimal.format(bytes)} B`;
+}
 
 export interface StoredFile {
   path: string;
@@ -37,7 +66,7 @@ export function r2KeyFromPublicUrl(url: string | null | undefined): string | nul
   }
 }
 
-async function accessToken(): Promise<string> {
+export async function accessToken(): Promise<string> {
   const {
     data: { session },
   } = await supabase.auth.getSession();
@@ -61,9 +90,38 @@ async function workerError(res: Response): Promise<Error> {
 
   if (res.status === 401) return new Error("Sessão inválida ou expirada. Entre novamente.");
   if (res.status === 403) return new Error("Apenas administradores podem alterar os arquivos.");
+  if (res.status === 413 && detail === "storage_full") {
+    storageUsageChanged();
+    return new Error(STORAGE_FULL_MESSAGE);
+  }
   if (res.status === 413) return new Error(FILE_TOO_LARGE_MESSAGE);
   if (res.status === 400) return new Error("Caminho do arquivo inválido.");
   return new Error("Não foi possível concluir a operação no armazenamento. Tente de novo.");
+}
+
+export async function fetchStorageUsage(
+  signal?: AbortSignal,
+  fresh = false,
+): Promise<StorageUsage> {
+  const token = await accessToken();
+  const url = new URL("/usage", filesWorkerUrl());
+  if (fresh) url.searchParams.set("fresh", "1");
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store",
+    signal,
+  });
+  if (!res.ok) throw await workerError(res);
+  return res.json();
+}
+
+export async function checkStorageSpace(incomingBytes: number) {
+  const usage = await fetchStorageUsage().catch(() => null);
+  if (!usage || usage.usedBytes + incomingBytes <= usage.limitBytes) return;
+  const fresh = await fetchStorageUsage(undefined, true).catch(() => null);
+  if (!fresh || fresh.usedBytes + incomingBytes <= fresh.limitBytes) return;
+  storageUsageChanged();
+  throw new Error(STORAGE_FULL_MESSAGE);
 }
 
 /** PUT the raw file body. The Worker returns the public R2 URL. */
@@ -73,6 +131,7 @@ export async function uploadToR2(
   contentType: string,
 ): Promise<StoredFile> {
   if (body.size > MAX_UPLOAD_BYTES) throw new Error(FILE_TOO_LARGE_MESSAGE);
+  await checkStorageSpace(body.size);
 
   const token = await accessToken();
   const endpoint = new URL("/upload", filesWorkerUrl());
@@ -87,6 +146,7 @@ export async function uploadToR2(
     body,
   });
   if (!res.ok) throw await workerError(res);
+  storageUsageChanged();
 
   const data = (await res.json()) as Partial<StoredFile>;
   if (!data.path || !data.url) {
@@ -111,4 +171,5 @@ export async function deleteFromR2(path: string): Promise<void> {
   });
   if (res.status === 404) return;
   if (!res.ok) throw await workerError(res);
+  storageUsageChanged();
 }
