@@ -26,11 +26,16 @@ Se o Google Drive perder a ligação, ficar sem espaço ou a cópia falhar vári
 
 ### Para o Carlos ativar o e-mail
 
-1. No Resend, crie uma chave de API com permissão **Sending access**, restrita ao domínio verificado **lojatialu.site**.
-2. No painel da Cloudflare, abra **Workers & Pages → tiavanete-files → Settings → Variables and Secrets**. Adicione um **Secret** com o nome `RESEND_API_KEY` e cole a chave do Resend. Pelo terminal, no diretório `cloudflare/worker`, use `wrangler secret put RESEND_API_KEY --name tiavanete-files`.
-3. O remetente padrão é **Site Tia Vanete <avisos@lojatialu.site>**. Para mudar quem recebe, ajuste `ALERT_EMAIL_TO`. Para receber uma cópia, preencha `ALERT_CC` com seu e-mail.
+O aviso por e-mail usa o **Resend**, numa conta só deste projeto. O remetente padrão é **Site Tia Vanete <onboarding@resend.dev>**, o endereço de teste do Resend, que não precisa de domínio. Esse endereço só entrega para o e-mail dono da conta do Resend. Por isso a conta precisa ser criada com o Gmail da Tia Vanete (**vanetedeoliveiramaffra@gmail.com**).
 
-Se preferir o **Cloudflare Email Routing**, ative o serviço no domínio do remetente. Verifique o e-mail da Tia Vanete como destino e também o seu, se usar `ALERT_CC`. No Worker `tiavanete-files`, adicione um binding **Send Email** com o nome `ALERT_EMAIL` que permita os destinos escolhidos. Configure `EMAIL_FROM` com um endereço desse domínio e mantenha `RESEND_API_KEY` ausente para usar essa opção. O Worker dá preferência ao Resend quando a chave está configurada.
+1. Crie uma conta no Resend com o e-mail **vanetedeoliveiramaffra@gmail.com** e confirme o cadastro pelo link que chega nesse Gmail.
+2. Nessa conta, crie uma chave de API com permissão **Sending access**.
+3. No painel da Cloudflare, abra **Workers & Pages → tiavanete-files → Settings → Variables and Secrets**. Adicione um **Secret** com o nome `RESEND_API_KEY` e cole a chave do Resend. Pelo terminal, no diretório `cloudflare/worker`, use `wrangler secret put RESEND_API_KEY --name tiavanete-files`.
+4. Quem recebe é definido em `ALERT_EMAIL_TO` (o Gmail da Tia Vanete). Com o remetente de teste, `ALERT_CC` não funciona, porque o Resend só entrega para o dono da conta.
+
+Se mais tarde a Tia Vanete tiver um domínio próprio, verifique esse domínio no Resend e configure `EMAIL_FROM` com um endereço dele, por exemplo `Site Tia Vanete <avisos@dominio-dela.com.br>`. Assim o aviso pode ir para qualquer destinatário, inclusive a cópia em `ALERT_CC`.
+
+Se preferir o **Cloudflare Email Routing**, ative o serviço no domínio próprio da Tia Vanete. Verifique o e-mail dela como destino e também o seu, se usar `ALERT_CC`. No Worker `tiavanete-files`, adicione um binding **Send Email** com o nome `ALERT_EMAIL` que permita os destinos escolhidos. Configure `EMAIL_FROM` com um endereço desse domínio e mantenha `RESEND_API_KEY` ausente para usar essa opção. O Worker dá preferência ao Resend quando a chave está configurada.
 
 ## Endpoints
 

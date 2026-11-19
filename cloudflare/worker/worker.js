@@ -18,7 +18,7 @@ const GOOGLE_NOT_CONNECTED = "O Google Drive ainda não está ligado. Peça ao C
 const GOOGLE_NEEDS_REAUTH = "Peça ao Carlos para ligar o Drive de novo.";
 const BACKUP_FETCH_BUDGET = 40;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const DEFAULT_EMAIL_FROM = "Site Tia Vanete <avisos@lojatialu.site>";
+const DEFAULT_EMAIL_FROM = "Site Tia Vanete <onboarding@resend.dev>";
 const BACKUP_PROBLEMS = {
   google_needs_reauth: {
     message: "O Google Drive perdeu a ligação com o site.",

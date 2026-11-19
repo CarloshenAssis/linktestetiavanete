@@ -697,7 +697,6 @@ test("daily token check with an empty bucket detects revocation and throttles Re
   const options = {};
   const f = fixture(t, [], options);
   f.env.RESEND_API_KEY = "mock-resend";
-  f.env.EMAIL_FROM = "Site Tia Vanete <avisos@lojatialu.site>";
   f.env.ALERT_EMAIL_TO = "vanete@example.com";
   f.env.ALERT_CC = "carlos@example.com";
   await f.connect();
@@ -725,7 +724,7 @@ test("daily token check with an empty bucket detects revocation and throttles Re
   assert.equal(mail.headers.get("Authorization"), "Bearer mock-resend");
   assert.equal(mail.headers.get("Content-Type"), "application/json");
   assert.match(mail.headers.get("Idempotency-Key"), /^backup-warning\/[a-f0-9]{64}$/);
-  assert.equal(mail.body.from, f.env.EMAIL_FROM);
+  assert.equal(mail.body.from, "Site Tia Vanete <onboarding@resend.dev>");
   assert.deepEqual(mail.body.to, ["vanete@example.com"]);
   assert.deepEqual(mail.body.cc, ["carlos@example.com"]);
   assert.match(mail.body.subject, /Google Drive/);
