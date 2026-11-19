@@ -16,6 +16,16 @@ export interface DriveStatus {
   email: string | null;
   needsReauth: boolean;
   lastBackup: BackupSummary | null;
+  health?: {
+    status: "ok" | "warning" | "error";
+    problem: string | null;
+    message: string | null;
+    action: string | null;
+    actionUrl: string | null;
+    lastSuccessAt: string | null;
+    emailConfigured: boolean;
+    lastAlertAt: string | null;
+  };
 }
 
 export interface DriveFolder {

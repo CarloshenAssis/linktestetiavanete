@@ -1,6 +1,6 @@
 # Worker da Tia Vanete
 
-O Worker usa um único arquivo, `worker.js`, sem dependências. O cron roda a cada 10 minutos entre 03h00 e 05h50 (horário de São Paulo), 18 lotes por noite; cada lote copia cerca de 15 arquivos por causa do limite de 50 chamadas do plano gratuito. A cópia guarda novas versões dos arquivos sem apagar as anteriores. Quando ainda houver pendências, use **Fazer backup agora** no painel para rodar mais um lote.
+O Worker usa um único arquivo, `worker.js`, sem dependências. O cron roda a cada 10 minutos entre 03h00 e 05h50 (horário de São Paulo), 18 lotes por noite; cada lote copia até cerca de 12 arquivos por causa do limite de 50 chamadas do plano gratuito. A cópia guarda novas versões dos arquivos sem apagar as anteriores. Quando ainda houver pendências, use **Fazer backup agora** no painel para rodar mais um lote.
 
 ## Configuração e publicação
 
@@ -17,6 +17,20 @@ wrangler deploy
 ```
 
 Também é possível enviar `worker.js` diretamente pela API da Cloudflare como módulo ES. Use os bindings, as variáveis e o cron do `wrangler.toml` e preserve os segredos já configurados. Depois de publicar, abra **Ligar o Google Drive** no painel e autorize a conta da Tia Vanete.
+
+## Pastas e avisos da cópia
+
+No Google Drive, abra **Backup Site Tia Vanete**. Lá ficam as pastas **Mensagens**, **Imagens** e **PDFs**. As capas ficam na pasta **Capas** dentro de cada categoria. A foto do perfil e os arquivos sem material ficam em **Outros**. Se o site ganhar uma nova categoria, ela terá uma pasta com o próprio nome.
+
+Se o Google Drive perder a ligação, ficar sem espaço ou a cópia falhar várias vezes, o painel mostra um aviso com o que fazer. O aviso também aparece quando passam mais de dois dias sem uma cópia bem-sucedida. Com o e-mail ativado, a Tia Vanete recebe até um aviso a cada 24 horas enquanto houver problema. A cópia e os avisos no painel funcionam mesmo sem configurar o e-mail.
+
+### Para o Carlos ativar o e-mail
+
+1. No Resend, crie uma chave de API com permissão **Sending access**, restrita ao domínio verificado **lojatialu.site**.
+2. No painel da Cloudflare, abra **Workers & Pages → tiavanete-files → Settings → Variables and Secrets**. Adicione um **Secret** com o nome `RESEND_API_KEY` e cole a chave do Resend. Pelo terminal, no diretório `cloudflare/worker`, use `wrangler secret put RESEND_API_KEY --name tiavanete-files`.
+3. O remetente padrão é **Site Tia Vanete <avisos@lojatialu.site>**. Para mudar quem recebe, ajuste `ALERT_EMAIL_TO`. Para receber uma cópia, preencha `ALERT_CC` com seu e-mail.
+
+Se preferir o **Cloudflare Email Routing**, ative o serviço no domínio do remetente. Verifique o e-mail da Tia Vanete como destino e também o seu, se usar `ALERT_CC`. No Worker `tiavanete-files`, adicione um binding **Send Email** com o nome `ALERT_EMAIL` que permita os destinos escolhidos. Configure `EMAIL_FROM` com um endereço desse domínio e mantenha `RESEND_API_KEY` ausente para usar essa opção. O Worker dá preferência ao Resend quando a chave está configurada.
 
 ## Endpoints
 

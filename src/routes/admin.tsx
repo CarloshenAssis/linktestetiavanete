@@ -138,13 +138,15 @@ function DriveStatusCard() {
       setStatus((previous) => previous && { ...previous, lastBackup });
     } catch (error) {
       toast.error((error as Error).message);
-      void fetchDriveStatus().then(setStatus, () => {});
     } finally {
+      void fetchDriveStatus().then(setStatus, () => {});
       setRunning(false);
     }
   }
 
   const last = status?.lastBackup;
+  const health = status?.health;
+  const warning = health && health.status !== "ok" ? health : null;
   const buttonClass =
     "inline-flex w-fit items-center justify-center rounded-full bg-sky-800 px-5 py-3 text-lg font-semibold text-white hover:bg-sky-900 disabled:opacity-60";
   return (
@@ -155,6 +157,25 @@ function DriveStatusCard() {
       <h2 id="drive-heading" className="font-display text-2xl">
         Cópia no Google Drive
       </h2>
+      {warning && (
+        <div
+          role="alert"
+          className="w-full space-y-3 rounded-xl border-2 border-red-800 bg-red-50 p-5 text-xl text-red-950"
+        >
+          <p className="text-2xl font-bold">{warning.message}</p>
+          <p>{warning.action}</p>
+          {warning.problem === "google_needs_reauth" && (
+            <a
+              href={warning.actionUrl || driveAuthUrl()}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex rounded-xl bg-red-800 px-5 py-4 text-xl font-bold text-white hover:bg-red-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-900"
+            >
+              Ligar o Google Drive de novo
+            </a>
+          )}
+        </div>
+      )}
       {status?.connected ? (
         <>
           <p>Google Drive ligado.</p>
@@ -181,7 +202,7 @@ function DriveStatusCard() {
             {running ? "Fazendo backup..." : "Fazer backup agora"}
           </button>
         </>
-      ) : (
+      ) : warning?.problem === "google_needs_reauth" ? null : (
         <p role="status">
           {status === undefined
             ? "Vendo a ligação com o Google Drive..."
@@ -192,7 +213,7 @@ function DriveStatusCard() {
                 : DRIVE_NOT_CONNECTED}
         </p>
       )}
-      {status?.configured && !status.connected && (
+      {status?.configured && !status.connected && warning?.problem !== "google_needs_reauth" && (
         <a href={driveAuthUrl()} target="_blank" rel="noreferrer" className={buttonClass}>
           Ligar o Google Drive
         </a>

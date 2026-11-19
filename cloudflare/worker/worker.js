@@ -17,6 +17,27 @@ const GOOGLE_NOT_CONFIGURED = "A ligação com o Google Drive ainda não foi con
 const GOOGLE_NOT_CONNECTED = "O Google Drive ainda não está ligado. Peça ao Carlos.";
 const GOOGLE_NEEDS_REAUTH = "Peça ao Carlos para ligar o Drive de novo.";
 const BACKUP_FETCH_BUDGET = 40;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_EMAIL_FROM = "Site Tia Vanete <avisos@lojatialu.site>";
+const BACKUP_PROBLEMS = {
+  google_needs_reauth: {
+    message: "O Google Drive perdeu a ligação com o site.",
+    action: "Abra este link e clique em Permitir.",
+  },
+  drive_full: {
+    message: "O espaço do seu Google Drive acabou.",
+    action: "Libere espaço no Google Drive ou compre mais espaço no Google One.",
+    actionUrl: "https://one.google.com/",
+  },
+  repeated_failures: {
+    message: "A cópia para o Google Drive falhou várias vezes.",
+    action: "Seus arquivos no site estão seguros. Fale com o Carlos para ele ajudar.",
+  },
+  stale: {
+    message: "Faz mais de dois dias que a cópia para o Google Drive não termina sem falhas.",
+    action: "Seus arquivos no site estão seguros. Fale com o Carlos para ele ajudar.",
+  },
+};
 // Keep these labels aligned with MATERIAL_CATEGORY_LABELS in src/lib/materials.ts.
 const CATEGORY_LABELS = new Map([
   ["pdfs", "PDFs"],
@@ -455,12 +476,23 @@ async function googleConnection(env) {
   };
 }
 
-async function googleAccessToken(env, request = fetch) {
+async function markReauth(env, connection) {
+  await env.STATE.put(
+    "google:status",
+    JSON.stringify({ state: "needs_reauth", connectionId: connection.connectionId }),
+  );
+}
+
+async function googleAccessToken(env, request = fetch, forceRefresh = false) {
   const { connection, needsReauth } = await googleConnection(env);
   if (!connection) throw new DriveError(409, "google_not_connected", GOOGLE_NOT_CONNECTED);
   if (needsReauth) throw new DriveError(409, "google_needs_reauth", GOOGLE_NEEDS_REAUTH);
   const cached = await env.STATE.get("google:access_token", "json");
-  if (cached?.connectionId === connection.connectionId && cached.expiresAt > Date.now())
+  if (
+    !forceRefresh &&
+    cached?.connectionId === connection.connectionId &&
+    cached.expiresAt > Date.now()
+  )
     return cached.token;
 
   const response = await requestGoogleToken(
@@ -468,15 +500,12 @@ async function googleAccessToken(env, request = fetch) {
     { grant_type: "refresh_token", refresh_token: connection.token },
     request,
   );
-  const data = await response.json();
-  if (data.error === "invalid_grant") {
-    await env.STATE.put(
-      "google:status",
-      JSON.stringify({ state: "needs_reauth", connectionId: connection.connectionId }),
-    );
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401 || data?.error === "invalid_grant") {
+    await markReauth(env, connection);
     throw new DriveError(409, "google_needs_reauth", GOOGLE_NEEDS_REAUTH);
   }
-  if (!response.ok || !data.access_token) throw new Error(`Google token: ${response.status}`);
+  if (!response.ok || !data?.access_token) throw new Error(`Google token: ${response.status}`);
   const ttl = Math.floor(data.expires_in - 60);
   if (ttl >= 60) {
     try {
@@ -497,15 +526,17 @@ async function googleAccessToken(env, request = fetch) {
 }
 
 async function googleStatus(req, env) {
-  const [{ connection, needsReauth }, last] = await Promise.all([
+  const [{ connection, needsReauth }, last, alert] = await Promise.all([
     googleConnection(env),
     env.STATE.get("backup:last", "json"),
+    env.STATE.get("backup:alert", "json"),
   ]);
   return json(req, {
     configured: true,
     connected: Boolean(connection) && !needsReauth,
     email: connection?.email ?? null,
     needsReauth,
+    health: backupHealth(env, connection, needsReauth, healthFor(last, connection), alert, req.url),
     lastBackup: last && {
       at: last.at,
       copied: last.copied,
@@ -524,11 +555,19 @@ function driveClient(token, request = fetch) {
     });
 }
 
+async function driveFailure(response, message) {
+  const data = await response.json().catch(() => null);
+  const storageFull =
+    response.status === 507 ||
+    data?.error?.errors?.some(({ reason }) => reason === "storageQuotaExceeded") ||
+    data?.error?.details?.some(({ reason }) => reason === "STORAGE_QUOTA_EXCEEDED");
+  const problem =
+    response.status === 401 ? "google_needs_reauth" : storageFull ? "drive_full" : null;
+  return Object.assign(new Error(message), { problem });
+}
+
 async function driveJson(response) {
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(`Google Drive: ${response.status}`);
-  }
+  if (!response.ok) throw await driveFailure(response, `Google Drive: ${response.status}`);
   return response.json();
 }
 
@@ -566,14 +605,35 @@ async function createDriveFolder(drive, name, parentId) {
   );
 }
 
-async function ensureDriveFolder(env, drive, path, name, parentId) {
+function driveQueryLiteral(value) {
+  return "'" + value.replace(/[\\']/g, "\\$&") + "'";
+}
+
+async function findDriveFile(drive, query, fields = "id") {
+  const url = new URL(DRIVE_FILES_URL);
+  url.search = new URLSearchParams({
+    q: `trashed=false and ${query}`,
+    fields: `files(${fields})`,
+    pageSize: "1",
+  });
+  return (await driveJson(await drive(url))).files?.[0];
+}
+
+async function ensureDriveFolder(env, drive, path, name, parentId, backup = false) {
   const cacheKey = `folder:${path}`;
   const cachedId = await env.STATE.get(cacheKey);
   if (cachedId) {
     const folder = await getDriveFolder(drive, cachedId);
     if (folder && (!parentId || folder.parents?.includes(parentId))) return folder;
   }
-  const folder = await createDriveFolder(drive, name, parentId);
+  const existing =
+    backup &&
+    (await findDriveFile(
+      drive,
+      `mimeType='${FOLDER_TYPE}' and name=${driveQueryLiteral(name)} and ${driveQueryLiteral(parentId || "root")} in parents`,
+      DRIVE_FOLDER_FIELDS,
+    ));
+  const folder = existing || (await createDriveFolder(drive, name, parentId));
   await env.STATE.put(cacheKey, folder.id);
   return folder;
 }
@@ -609,9 +669,10 @@ async function uploadSession(drive, metadata, mimeType, size, origin) {
     body: JSON.stringify(metadata),
   });
   const location = response.headers.get("Location");
+  if (!response.ok)
+    throw await driveFailure(response, `Sessão de envio do Google Drive: ${response.status}`);
   await response.body?.cancel();
-  if (!response.ok || !location)
-    throw new Error(`Sessão de envio do Google Drive: ${response.status}`);
+  if (!location) throw new Error(`Sessão de envio do Google Drive: ${response.status}`);
   return location;
 }
 
@@ -701,11 +762,18 @@ async function driveRequest(req, env, path) {
   return json(req, { uploadUrl });
 }
 
+async function digestText(value) {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)),
+  );
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 async function backupRecordKey(key) {
-  const bytes = new TextEncoder().encode(`backup:${key}`);
-  if (bytes.length <= 512) return `backup:${key}`;
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  return `backup-long:${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  const recordKey = `backup:${key}`;
+  if (new TextEncoder().encode(recordKey).length <= 512 && !["last", "alert"].includes(key))
+    return recordKey;
+  return `backup-long:${await digestText(recordKey)}`;
 }
 
 async function backupInventory(env) {
@@ -759,8 +827,13 @@ async function backupMaterials(env, request) {
     }
     const materials = await response.json();
     for (const material of materials) {
-      const category = CATEGORY_LABELS.get(material.category);
-      if (!category) continue;
+      const label = material.category
+        ?.trim()
+        .replace(/[_/\\-]+/g, " ")
+        .trim();
+      const category =
+        CATEGORY_LABELS.get(material.category) ||
+        (label ? label[0].toLocaleUpperCase("pt-BR") + label.slice(1) : "Outros");
       for (const key of [
         r2Key(material.file_path) || material.file_path,
         r2Key(material.file_url),
@@ -800,13 +873,33 @@ function backupDestination(key, materials, names) {
 
 async function copyToDrive(env, drive, item, name, parentId, request) {
   const { key, size, etag } = item.object;
+  const version = await digestText(JSON.stringify([key, etag]));
+  const existing = await findDriveFile(
+    drive,
+    `appProperties has { key='backupVersion' and value='${version}' }`,
+  );
+  const driveId =
+    existing?.id || (await uploadBackupFile(env, drive, item, name, parentId, request, version));
+  await env.STATE.put(
+    item.recordKey,
+    JSON.stringify({ driveId, etag, size, at: new Date().toISOString() }),
+  );
+}
+
+async function uploadBackupFile(env, drive, item, name, parentId, request, version) {
+  const { key, size, etag } = item.object;
   const object = await env.BUCKET.get(key, { onlyIf: { etagMatches: etag } });
   if (!object?.body) throw new Error("O arquivo mudou antes da cópia.");
   try {
     const mimeType = object.httpMetadata?.contentType || "application/octet-stream";
     const url = await uploadSession(
       drive,
-      { name, parents: [parentId], description: `R2: ${key}` },
+      {
+        name,
+        parents: [parentId],
+        description: `R2: ${key}`,
+        appProperties: { backupVersion: version },
+      },
       mimeType,
       size,
     );
@@ -822,19 +915,24 @@ async function copyToDrive(env, drive, item, name, parentId, request) {
     ]);
     const { id: driveId } = await driveJson(response);
     if (!driveId) throw new Error("O Drive não confirmou a cópia.");
-    await env.STATE.put(
-      item.recordKey,
-      JSON.stringify({ driveId, etag, size, at: new Date().toISOString() }),
-    );
+    return driveId;
   } finally {
     if (!object.body.locked) await object.body.cancel();
   }
 }
 
-async function runBackup(env, { budget }) {
+async function runBackup(env, { budget, scheduled = false }) {
+  const { connection, needsReauth } = await googleConnection(env);
+  if (scheduled && !connection) return;
+  const previous = connection
+    ? healthFor(await env.STATE.get("backup:last", "json"), connection)
+    : {};
+  let tokenCheckAt = previous.tokenCheckAt ?? null;
+  let problem = null;
+  let fatal = false;
   const summary = { at: new Date().toISOString(), copied: 0, failed: 0, remaining: 0 };
   const errors = [];
-  const signal = AbortSignal.timeout(13 * 60 * 1000);
+  const signal = AbortSignal.timeout((scheduled ? 9 : 13) * 60 * 1000);
   let available = budget;
   const request = (url, options) => {
     if (available <= 0) throw new Error("Limite de chamadas do backup atingido.");
@@ -843,11 +941,15 @@ async function runBackup(env, { budget }) {
   };
 
   try {
+    const checkToken =
+      scheduled && (needsReauth || tokenCheckAt?.slice(0, 10) !== summary.at.slice(0, 10));
+    const token = checkToken ? await googleAccessToken(env, request, true) : null;
+    if (checkToken) tokenCheckAt = summary.at;
     const inventory = await backupInventory(env);
     summary.remaining = inventory.filter(({ needsCopy }) => needsCopy).length;
     if (!summary.remaining) return summary;
 
-    const drive = driveClient(await googleAccessToken(env, request), request);
+    const drive = driveClient(token || (await googleAccessToken(env, request)), request);
     const materials = await backupMaterials(env, request);
     const names = new Map();
     const folders = new Map();
@@ -858,9 +960,10 @@ async function runBackup(env, { budget }) {
       if (!item.needsCopy) continue;
       const path = ["backup-root", ...categories];
       const folderKeys = path.map((_, index) => path.slice(0, index + 1).join("/"));
-      // Each uncached folder may need a read and a create. Each upload needs two more calls.
+      // Allow for a cached folder check, lookup and create, plus a file lookup and upload.
       const missing = folderKeys.filter((key) => !folders.has(key)).length;
-      if (available < 2 + 2 * missing || signal.aborted) break;
+      if (available < 3 + 3 * missing) break;
+      signal.throwIfAborted();
 
       try {
         let parentId;
@@ -872,6 +975,7 @@ async function runBackup(env, { budget }) {
               key,
               index === 0 ? rootName : path[index],
               parentId,
+              true,
             );
             folders.set(key, folder.id);
           }
@@ -884,16 +988,212 @@ async function runBackup(env, { budget }) {
         summary.failed++;
         errors.push({ key: item.object.key, error: error.message });
         console.error("Falha ao copiar arquivo para o Drive.", item.object.key, error.message);
+        if (error.problem) {
+          problem = error.problem;
+          if (problem === "google_needs_reauth") await markReauth(env, connection);
+          break;
+        }
       }
     }
+    signal.throwIfAborted();
     return summary;
+  } catch (error) {
+    fatal = true;
+    problem = error.problem || (error.code === "google_needs_reauth" ? error.code : problem);
+    throw error;
   } finally {
+    const success = !needsReauth && !fatal && summary.failed === 0;
+    const failedRuns = success ? 0 : (previous.failedRuns ?? 0) + 1;
+    const health = connection && {
+      connectionId: connection.connectionId ?? connection.connectedAt,
+      lastRunAt: summary.at,
+      lastSuccessAt: success ? summary.at : (previous.lastSuccessAt ?? null),
+      tokenCheckAt,
+      failedRuns,
+      problem,
+    };
+    if (health) {
+      health.problem = backupProblem(connection, needsReauth, health);
+      health.message = BACKUP_PROBLEMS[health.problem]?.message ?? null;
+    }
     try {
-      await env.STATE.put("backup:last", JSON.stringify({ ...summary, errors }));
+      if (connection || !scheduled)
+        await env.STATE.put("backup:last", JSON.stringify({ ...summary, errors, health }));
     } catch (error) {
       console.error("Não foi possível salvar o resultado do backup.", error);
     }
   }
+}
+
+function healthFor(last, connection) {
+  const id = connection?.connectionId ?? connection?.connectedAt;
+  return last?.health && last.health.connectionId === id ? last.health : {};
+}
+
+function backupProblem(connection, needsReauth, health) {
+  if (!connection) return null;
+  if (needsReauth) return "google_needs_reauth";
+  if (health.problem === "drive_full" || health.problem === "google_needs_reauth")
+    return health.problem;
+  const since = health.lastSuccessAt ?? connection.connectedAt;
+  if (Date.now() - Date.parse(since) > 2 * DAY_MS) return "stale";
+  return health.failedRuns >= 3 ? "repeated_failures" : null;
+}
+
+function backupHealth(env, connection, needsReauth, health, alert, requestUrl) {
+  const problem = backupProblem(connection, needsReauth, health);
+  const detail = BACKUP_PROBLEMS[problem];
+  return {
+    status: !problem
+      ? "ok"
+      : problem === "stale" || problem === "repeated_failures"
+        ? "warning"
+        : "error",
+    problem,
+    message: detail?.message ?? null,
+    action: detail?.action ?? null,
+    actionUrl:
+      problem === "google_needs_reauth"
+        ? new URL(
+            "/google/auth-start",
+            env.PUBLIC_WORKER_URL || requestUrl || "https://tiavanete-files.carloshen.workers.dev",
+          ).href
+        : (detail?.actionUrl ?? null),
+    lastSuccessAt: health.lastSuccessAt ?? null,
+    emailConfigured: Boolean(env.RESEND_API_KEY || env.ALERT_EMAIL?.send),
+    lastAlertAt: alert?.lastAlertAt ?? null,
+  };
+}
+
+function escapeEmailHtml(value) {
+  return value.replace(
+    /[&<>"']/g,
+    (char) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[char],
+  );
+}
+
+async function sendRoutingAlert(binding, { from, to, cc, subject, text, html }) {
+  const { EmailMessage } = await import("cloudflare:email");
+  const sender = from.match(/<([^<>]+)>$/)?.[1] ?? from;
+  const boundary = crypto.randomUUID();
+  const encode = (value) => btoa(String.fromCharCode(...new TextEncoder().encode(value)));
+  const part = (type, body) => [
+    `--${boundary}`,
+    `Content-Type: ${type}; charset=UTF-8`,
+    "Content-Transfer-Encoding: base64",
+    "",
+    ...encode(body).match(/.{1,76}/g),
+  ];
+  const send = (recipient) => {
+    if ([sender, recipient].some((address) => /[\r\n]/.test(address)))
+      throw new Error("Endereço inválido.");
+    const raw = [
+      `From: ${sender}`,
+      `To: ${recipient}`,
+      `Subject: =?UTF-8?B?${encode(subject)}?=`,
+      `Date: ${new Date().toUTCString()}`,
+      `Message-ID: <${crypto.randomUUID()}@${sender.split("@")[1] || "localhost"}>`,
+      "MIME-Version: 1.0",
+      `Content-Type: multipart/alternative; boundary="${boundary}"`,
+      "",
+      ...part("text/plain", text),
+      ...part("text/html", html),
+      `--${boundary}--`,
+      "",
+    ].join("\r\n");
+    return binding.send(new EmailMessage(sender, recipient, raw));
+  };
+  await send(to[0]);
+  if (cc && cc[0].toLowerCase() !== to[0].toLowerCase()) {
+    try {
+      await send(cc[0]);
+    } catch {
+      return "sent_cc_failed";
+    }
+  }
+  return "sent";
+}
+
+async function alertBackupProblem(env) {
+  const [{ connection, needsReauth }, last, alert] = await Promise.all([
+    googleConnection(env),
+    env.STATE.get("backup:last", "json"),
+    env.STATE.get("backup:alert", "json"),
+  ]);
+  if (!connection) return;
+  const health = backupHealth(env, connection, needsReauth, healthFor(last, connection), alert);
+  if (!health.problem) return;
+  if (!health.emailConfigured) {
+    console.info("Aviso da cópia do Google Drive sem e-mail configurado.", health.problem);
+    return;
+  }
+  const now = Date.now();
+  if (
+    now - Date.parse(alert?.lastAlertAt) < DAY_MS ||
+    now - Date.parse(alert?.lastAttemptAt) < 60 * 60 * 1000
+  )
+    return;
+  const at = new Date(now).toISOString();
+  const actionLink = health.actionUrl
+    ? `<p><a href="${escapeEmailHtml(health.actionUrl)}">${
+        health.problem === "google_needs_reauth"
+          ? "Ligar o Google Drive de novo"
+          : "Abrir o Google One"
+      }</a></p>`
+    : "";
+  const mail = {
+    from: env.EMAIL_FROM?.trim() || DEFAULT_EMAIL_FROM,
+    to: [env.ALERT_EMAIL_TO?.trim() || allowedEmail(env)],
+    ...(env.ALERT_CC?.trim() && { cc: [env.ALERT_CC.trim()] }),
+    subject: "Aviso sobre a cópia no Google Drive",
+    text: ["Olá, Tia Vanete!", health.message, health.action, health.actionUrl]
+      .filter(Boolean)
+      .join("\n\n"),
+    html: `<div lang="pt-BR" style="font:22px/1.5 Arial,sans-serif;color:#181818"><p>Olá, Tia Vanete!</p><p><strong>${health.message}</strong></p><p>${health.action}</p>${actionLink}</div>`,
+  };
+  const provider = env.RESEND_API_KEY ? "resend" : "email_routing";
+  let result = "failed";
+  try {
+    if (env.RESEND_API_KEY) {
+      const alertKey = await digestText(
+        JSON.stringify([env.PUBLIC_WORKER_URL, mail.to, alert?.lastAlertAt ?? null]),
+      );
+      const response = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.RESEND_API_KEY}`,
+          "Content-Type": "application/json",
+          "Idempotency-Key": `backup-warning/${alertKey}`,
+        },
+        body: JSON.stringify(mail),
+        redirect: "error",
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (response.ok) result = "sent";
+      await response.body?.cancel();
+    } else {
+      result = await sendRoutingAlert(env.ALERT_EMAIL, mail);
+    }
+  } catch {
+    console.warn("Falha ao enviar o aviso da cópia do Google Drive.", provider);
+  }
+  await env.STATE.put(
+    "backup:alert",
+    JSON.stringify({
+      lastAttemptAt: at,
+      lastAlertAt: result === "failed" ? (alert?.lastAlertAt ?? null) : new Date().toISOString(),
+      result,
+      provider,
+      problem: health.problem,
+    }),
+  );
 }
 
 function googleRoute(path, method) {
@@ -977,9 +1277,14 @@ export default {
   async scheduled(_event, env) {
     if (!googleConfigured(env)) return;
     try {
-      await runBackup(env, { budget: BACKUP_FETCH_BUDGET });
+      await runBackup(env, { budget: BACKUP_FETCH_BUDGET, scheduled: true });
     } catch (error) {
-      if (!(error instanceof DriveError)) console.error("Falha no backup do Drive.", error.message);
+      if (!(error instanceof DriveError)) console.error("Falha no backup do Drive.", error.name);
+    }
+    try {
+      await alertBackupProblem(env);
+    } catch {
+      console.error("Não foi possível registrar o aviso da cópia do Google Drive.");
     }
   },
 };

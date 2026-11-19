@@ -14,6 +14,7 @@ function fixture(t, files = [], options = {}) {
   const folders = new Map();
   const sessions = new Map();
   const copies = [];
+  const emails = [];
   let listCalls = 0;
   let counter = 0;
   let multipartParts = 0;
@@ -36,6 +37,7 @@ function fixture(t, files = [], options = {}) {
     GOOGLE_CLIENT_ID: "client",
     GOOGLE_CLIENT_SECRET: "secret",
     ALLOWED_GOOGLE_EMAIL: "admin@example.com",
+    PUBLIC_WORKER_URL: WORKER_URL,
     STATE: {
       async get(key, type) {
         return Array.isArray(key)
@@ -108,6 +110,10 @@ function fixture(t, files = [], options = {}) {
     const method = init.method ?? "GET";
     const headers = new Headers(init.headers);
     calls.push({ url, method, headers });
+    if (url.href === "https://api.resend.com/emails") {
+      emails.push({ method, headers, body: JSON.parse(init.body) });
+      return Response.json({ id: "mail-id" }, { status: options.mailStatus ?? 200 });
+    }
     if (url.pathname === "/auth/v1/user") {
       return headers.get("Authorization") === "Bearer admin"
         ? Response.json({ id: "admin-id" })
@@ -133,6 +139,7 @@ function fixture(t, files = [], options = {}) {
       }
       assert.equal(grant, "refresh_token");
       assert.equal(init.body.get("refresh_token"), "offline-token");
+      if (options.tokenStatus) return new Response(null, { status: options.tokenStatus });
       return options.invalidGrant
         ? Response.json({ error: "invalid_grant" }, { status: 400 })
         : Response.json({ access_token: "refreshed-token", expires_in: 3600 });
@@ -155,10 +162,22 @@ function fixture(t, files = [], options = {}) {
       return folder ? Response.json(folder) : new Response(null, { status: 404 });
     }
     if (url.pathname === "/drive/v3/files") {
-      const root = /'([^']+)' in parents/.exec(url.searchParams.get("q"))[1];
+      const query = url.searchParams.get("q");
+      const version = /value='([a-f0-9]+)'/.exec(query)?.[1];
+      if (version) {
+        return Response.json({
+          files: copies.filter((file) => file.appProperties.backupVersion === version),
+        });
+      }
+      const root = /'([^']+)' in parents/.exec(query)[1];
+      const name = /name='([^']+)'/.exec(query)?.[1];
       assert.match(url.searchParams.get("q"), /trashed=false/);
       return Response.json({
-        files: [...folders.values()].filter((folder) => folder.parents?.includes(root)),
+        files: [...folders.values()].filter(
+          (folder) =>
+            (folder.parents?.includes(root) || (root === "root" && !folder.parents)) &&
+            (!name || name === folder.name),
+        ),
       });
     }
     if (url.pathname === "/upload/drive/v3/files") {
@@ -177,8 +196,15 @@ function fixture(t, files = [], options = {}) {
       if (options.failKey && session.description === `R2: ${options.failKey}`) {
         return new Response(null, { status: 503 });
       }
-      copies.push(session);
-      return Response.json({ id: `copy-${++counter}` });
+      if (options.uploadStatus) {
+        return Response.json(
+          { error: { errors: [{ reason: options.uploadReason }] } },
+          { status: options.uploadStatus },
+        );
+      }
+      const id = `copy-${++counter}`;
+      copies.push({ ...session, id });
+      return Response.json({ id });
     }
     assert.fail(`Fetch inesperado: ${method} ${url}`);
   });
@@ -231,6 +257,7 @@ function fixture(t, files = [], options = {}) {
     folders,
     sessions,
     copies,
+    emails,
     get listCalls() {
       return listCalls;
     },
@@ -434,6 +461,16 @@ test("OAuth accepts the configured email regardless of case", async (t) => {
     email: "ADMIN@example.com",
     needsReauth: false,
     lastBackup: null,
+    health: {
+      status: "ok",
+      problem: null,
+      message: null,
+      action: null,
+      actionUrl: null,
+      lastSuccessAt: null,
+      emailConfigured: false,
+      lastAlertAt: null,
+    },
   });
 });
 
@@ -478,7 +515,7 @@ test("backup copies only new and changed keys, files by material, and respects t
   const response = await f.request("/backup/run", { method: "POST" });
   assert.equal(response.status, 200);
   const first = await response.json();
-  assert.ok(first.copied > 10 && first.remaining > 0);
+  assert.ok(first.copied >= 9 && first.remaining > 0);
   assert.equal(first.failed, 0);
   assert.equal(first.copied + first.remaining, files.length - 1);
   assert.ok(f.calls.length <= 40, `Chamadas externas: ${f.calls.length}`);
@@ -500,9 +537,13 @@ test("backup copies only new and changed keys, files by material, and respects t
   let calls = f.calls.length;
   await worker.scheduled({}, f.env);
   assert.ok(f.calls.length - calls <= 40);
-  assert.equal((await f.env.STATE.get("backup:last", "json")).remaining, 0);
+  while ((await f.env.STATE.get("backup:last", "json")).remaining > 0) {
+    const total = f.copies.length;
+    await worker.scheduled({}, f.env);
+    assert.ok(f.copies.length > total);
+  }
   assert.equal(f.copies.length, files.length - 1);
-  assert.equal(f.calls.filter(({ url }) => url.host === "oauth2.googleapis.com").length, 1);
+  assert.equal(f.calls.filter(({ url }) => url.host === "oauth2.googleapis.com").length, 2);
 
   calls = f.calls.length;
   await worker.scheduled({}, f.env);
@@ -598,4 +639,206 @@ test("personal folders are managed under the upload root and sessions forward th
   const recovered = await (await f.request("/drive/folders")).json();
   assert.notEqual(recovered.root.id, initial.root.id);
   assert.deepEqual(recovered.folders, []);
+});
+
+test("backup uses all category folders and recovers existing Drive items after KV loss", async (t) => {
+  const f = fixture(
+    t,
+    [
+      ["a.txt", 1],
+      ["avatar.png", 2],
+      ["c.png", 3],
+      ["i.png", 4],
+      ["p.pdf", 5],
+      ["v.mp4", 6],
+    ],
+    {
+      materials: [
+        {
+          category: "mensagens",
+          title: "Oração",
+          file_path: "a.txt",
+          cover_url: `${R2_PUBLIC}/c.png`,
+        },
+        { category: "imagens", title: "Flores", file_path: "i.png" },
+        { category: "pdfs", title: "Leitura", file_path: "p.pdf" },
+        { category: "vídeos-curtos", title: "Vídeo", file_path: "v.mp4" },
+      ],
+    },
+  );
+  await f.connect();
+  await worker.scheduled({}, f.env);
+  function folderPath(id) {
+    const { name, parents } = f.folders.get(id);
+    return parents ? `${folderPath(parents[0])}/${name}` : name;
+  }
+  assert.deepEqual(
+    f.copies.map(({ name, parents }) => `${folderPath(parents[0])}/${name}`),
+    [
+      "Backup Site Tia Vanete/Mensagens/Oração.txt",
+      "Backup Site Tia Vanete/Outros/avatar.png",
+      "Backup Site Tia Vanete/Mensagens/Capas/Oração.png",
+      "Backup Site Tia Vanete/Imagens/Flores.png",
+      "Backup Site Tia Vanete/PDFs/Leitura.pdf",
+      "Backup Site Tia Vanete/Vídeos curtos/Vídeo.mp4",
+    ],
+  );
+  for (const key of f.data.keys()) {
+    if (key.startsWith("folder:") || /^(backup:).+\./.test(key)) f.data.delete(key);
+  }
+  await worker.scheduled({}, f.env);
+  assert.equal(f.copies.length, 6);
+  assert.equal(f.folders.size, 7);
+  assert.equal((await f.env.STATE.get("backup:last", "json")).remaining, 0);
+});
+
+test("daily token check with an empty bucket detects revocation and throttles Resend for 24h", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-19T06:00:00Z") });
+  const options = {};
+  const f = fixture(t, [], options);
+  f.env.RESEND_API_KEY = "mock-resend";
+  f.env.EMAIL_FROM = "Site Tia Vanete <avisos@lojatialu.site>";
+  f.env.ALERT_EMAIL_TO = "vanete@example.com";
+  f.env.ALERT_CC = "carlos@example.com";
+  await f.connect();
+  await worker.scheduled({}, f.env);
+  const original = (await f.env.STATE.get("backup:last", "json")).health;
+  assert.equal(original.lastSuccessAt, "2026-11-19T06:00:00.000Z");
+  assert.equal(original.lastRunAt, original.lastSuccessAt);
+  assert.equal(original.failedRuns, 0);
+  assert.equal(f.emails.length, 0);
+
+  options.invalidGrant = true;
+  t.mock.timers.setTime(Date.parse("2026-11-20T06:00:00Z"));
+  await worker.scheduled({}, f.env);
+  const status = await (await f.request("/google/status")).json();
+  assert.equal(status.connected, false);
+  assert.equal(status.needsReauth, true);
+  assert.equal(status.health.status, "error");
+  assert.equal(status.health.problem, "google_needs_reauth");
+  assert.equal(status.health.actionUrl, `${WORKER_URL}/google/auth-start`);
+  assert.equal(status.health.lastSuccessAt, original.lastSuccessAt);
+  assert.equal(status.health.emailConfigured, true);
+  assert.equal(status.health.lastAlertAt, "2026-11-20T06:00:00.000Z");
+  const [mail] = f.emails;
+  assert.equal(mail.method, "POST");
+  assert.equal(mail.headers.get("Authorization"), "Bearer mock-resend");
+  assert.equal(mail.headers.get("Content-Type"), "application/json");
+  assert.match(mail.headers.get("Idempotency-Key"), /^backup-warning\/[a-f0-9]{64}$/);
+  assert.equal(mail.body.from, f.env.EMAIL_FROM);
+  assert.deepEqual(mail.body.to, ["vanete@example.com"]);
+  assert.deepEqual(mail.body.cc, ["carlos@example.com"]);
+  assert.match(mail.body.subject, /Google Drive/);
+  assert.match(mail.body.text, /Abra este link e clique em Permitir/);
+  assert.ok(mail.body.text.includes(status.health.actionUrl));
+  assert.ok(mail.body.html.includes(status.health.actionUrl));
+  assert.match(mail.body.html, /22px/);
+  assert.equal((await f.env.STATE.get("backup:alert", "json")).result, "sent");
+
+  t.mock.timers.setTime(Date.parse("2026-11-21T05:59:59Z"));
+  await worker.scheduled({}, f.env);
+  assert.equal(f.emails.length, 1);
+  t.mock.timers.setTime(Date.parse("2026-11-21T06:00:00Z"));
+  await worker.scheduled({}, f.env);
+  assert.equal(f.emails.length, 2);
+  assert.notEqual(f.emails[1].headers.get("Idempotency-Key"), mail.headers.get("Idempotency-Key"));
+});
+
+test("Google Drive 401 requests reconnection and a storage quota error asks for more space", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const options = { uploadStatus: 403, uploadReason: "storageQuotaExceeded" };
+  const f = fixture(t, [["arquivo.txt", 1]], options);
+  f.env.RESEND_API_KEY = "mock-resend";
+  await f.connect();
+  await f.request("/backup/run", { method: "POST" });
+  let status = await (await f.request("/google/status")).json();
+  assert.equal(status.health.problem, "drive_full");
+  assert.equal(status.health.status, "error");
+  assert.equal(f.emails.length, 0);
+  await worker.scheduled({}, f.env);
+  assert.deepEqual(f.emails[0].body.to, ["admin@example.com"]);
+  assert.equal("cc" in f.emails[0].body, false);
+  assert.match(f.emails[0].body.text, /Libere espaço.*Google One/);
+  options.uploadStatus = 401;
+  await worker.scheduled({}, f.env);
+  status = await (await f.request("/google/status")).json();
+  assert.equal(status.health.problem, "google_needs_reauth");
+  assert.equal(status.needsReauth, true);
+  assert.equal(f.emails.length, 1);
+});
+
+test("repeated errors warn on the third failure and a clean run clears health", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const options = { failKey: "arquivo.txt" };
+  const f = fixture(t, [["arquivo.txt", 1]], options);
+  f.env.RESEND_API_KEY = "mock-resend";
+  await f.connect();
+  for (let failures = 1; failures <= 3; failures++) {
+    await worker.scheduled({}, f.env);
+    const { health } = await f.env.STATE.get("backup:last", "json");
+    assert.equal(health.failedRuns, failures);
+    assert.equal(health.lastSuccessAt, null);
+    assert.equal(f.emails.length, failures < 3 ? 0 : 1);
+  }
+  assert.match(f.emails[0].body.text, /Seus arquivos no site estão seguros.*Carlos/);
+  options.failKey = null;
+  await worker.scheduled({}, f.env);
+  const { health } = await f.env.STATE.get("backup:last", "json");
+  assert.equal(health.failedRuns, 0);
+  assert.ok(health.lastSuccessAt);
+  assert.equal(health.problem, null);
+});
+
+test("stale warning starts after 48 hours even if the next run fails before any upload", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const start = Date.parse("2026-11-19T06:00:00Z");
+  t.mock.timers.enable({ apis: ["Date"], now: start });
+  const options = {};
+  const f = fixture(t, [], options);
+  f.env.RESEND_API_KEY = "mock-resend";
+  await f.connect();
+  await worker.scheduled({}, f.env);
+  t.mock.timers.setTime(start + 48 * 60 * 60 * 1000);
+  const status = async () => (await (await f.request("/google/status")).json()).health;
+  assert.equal((await status()).status, "ok");
+  t.mock.timers.tick(1);
+  assert.equal((await status()).problem, "stale");
+  options.tokenStatus = 503;
+  await worker.scheduled({}, f.env);
+  assert.equal((await status()).problem, "stale");
+  assert.equal((await f.env.STATE.get("backup:last", "json")).health.problem, "stale");
+  assert.match(f.emails[0].body.text, /mais de dois dias.*\n\nSeus arquivos no site estão seguros/);
+});
+
+test("scheduled alerts require Google configuration, a connection, and an email provider", async (t) => {
+  t.mock.method(console, "info", () => {});
+  const f = fixture(t, [], { invalidGrant: true });
+  f.env.RESEND_API_KEY = "mock-resend";
+  await worker.scheduled({}, f.env);
+  assert.equal(f.calls.length, 0);
+  await f.connect();
+  delete f.env.GOOGLE_CLIENT_ID;
+  await worker.scheduled({}, f.env);
+  assert.equal(f.calls.length, 0);
+  f.env.GOOGLE_CLIENT_ID = "client";
+  delete f.env.RESEND_API_KEY;
+  await worker.scheduled({}, f.env);
+  const status = await (await f.request("/google/status")).json();
+  assert.equal(status.health.emailConfigured, false);
+  assert.equal(status.health.problem, "google_needs_reauth");
+  assert.equal(f.emails.length, 0);
+  assert.equal(f.data.has("backup:alert"), false);
+});
+
+test("a rejected email records the failure and leaves lastAlertAt empty", async (t) => {
+  const f = fixture(t, [], { invalidGrant: true, mailStatus: 403 });
+  f.env.RESEND_API_KEY = "mock-resend";
+  await f.connect();
+  await worker.scheduled({}, f.env);
+  await worker.scheduled({}, f.env);
+  const alert = await f.env.STATE.get("backup:alert", "json");
+  assert.equal(alert.result, "failed");
+  assert.equal(alert.lastAlertAt, null);
+  assert.ok(alert.lastAttemptAt);
+  assert.equal(f.emails.length, 1);
 });
