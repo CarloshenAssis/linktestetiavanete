@@ -6,6 +6,33 @@ const R2_PUBLIC = "https://pub-e9be11aeab4a431e8dc85a854ae160fe.r2.dev";
 const WORKER_URL = "https://arquivos.example";
 const FRONTEND_ORIGIN = "https://tiavanete.vercel.app";
 const FOLDER_TYPE = "application/vnd.google-apps.folder";
+const GMAIL_SEND = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
+
+function parseMime(raw) {
+  const [head, ...rest] = raw.split("\r\n\r\n");
+  const headers = Object.fromEntries(
+    head.split("\r\n").map((line) => {
+      const i = line.indexOf(": ");
+      return [line.slice(0, i).toLowerCase(), line.slice(i + 2)];
+    }),
+  );
+  const decodeWord = (value) =>
+    value.replace(/=\?UTF-8\?B\?([^?]+)\?=/g, (_, b64) => Buffer.from(b64, "base64").toString());
+  const body = rest.join("\r\n\r\n");
+  const part = (type) => {
+    const match = new RegExp(
+      `Content-Type: ${type}; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n([A-Za-z0-9+/=\r\n]+?)\r\n--`,
+    ).exec(body);
+    return match && Buffer.from(match[1].replace(/\r\n/g, ""), "base64").toString();
+  };
+  return {
+    headers,
+    from: decodeWord(headers.from),
+    subject: decodeWord(headers.subject),
+    text: part("text/plain"),
+    html: part("text/html"),
+  };
+}
 
 function fixture(t, files = [], options = {}) {
   const data = new Map();
@@ -37,6 +64,7 @@ function fixture(t, files = [], options = {}) {
     GOOGLE_CLIENT_ID: "client",
     GOOGLE_CLIENT_SECRET: "secret",
     ALLOWED_GOOGLE_EMAIL: "admin@example.com",
+    ALERT_SENDER_EMAIL: "Sender@Example.com",
     PUBLIC_WORKER_URL: WORKER_URL,
     STATE: {
       async get(key, type) {
@@ -110,8 +138,11 @@ function fixture(t, files = [], options = {}) {
     const method = init.method ?? "GET";
     const headers = new Headers(init.headers);
     calls.push({ url, method, headers });
-    if (url.href === "https://api.resend.com/emails") {
-      emails.push({ method, headers, body: JSON.parse(init.body) });
+    if (url.href === GMAIL_SEND) {
+      const { raw } = JSON.parse(init.body);
+      assert.match(raw, /^[A-Za-z0-9_-]+$/);
+      const mime = Buffer.from(raw, "base64url").toString();
+      emails.push({ method, httpHeaders: headers, raw: mime, ...parseMime(mime) });
       return Response.json({ id: "mail-id" }, { status: options.mailStatus ?? 200 });
     }
     if (url.pathname === "/auth/v1/user") {
@@ -135,9 +166,18 @@ function fixture(t, files = [], options = {}) {
       assert.equal(init.body.get("client_secret"), "secret");
       if (grant === "authorization_code") {
         assert.equal(init.body.get("redirect_uri"), `${WORKER_URL}/google/callback`);
-        return Response.json({ access_token: "callback-token", refresh_token: "offline-token" });
+        return Response.json({
+          access_token: "callback-token",
+          refresh_token: options.callbackRefresh ?? "offline-token",
+          ...(options.grantedScope && { scope: options.grantedScope }),
+        });
       }
       assert.equal(grant, "refresh_token");
+      if (init.body.get("refresh_token") === "sender-token") {
+        return options.senderInvalidGrant
+          ? Response.json({ error: "invalid_grant" }, { status: 400 })
+          : Response.json({ access_token: "sender-access", expires_in: 3600 });
+      }
       assert.equal(init.body.get("refresh_token"), "offline-token");
       if (options.tokenStatus) return new Response(null, { status: options.tokenStatus });
       return options.invalidGrant
@@ -247,10 +287,23 @@ function fixture(t, files = [], options = {}) {
     );
   }
 
+  async function authorizeSender() {
+    await env.STATE.put(
+      "alert_sender:refresh_token",
+      JSON.stringify({
+        token: "sender-token",
+        email: "sender@example.com",
+        connectedAt: new Date().toISOString(),
+        connectionId: "sender-connection",
+      }),
+    );
+  }
+
   return {
     env,
     request,
     connect,
+    authorizeSender,
     data,
     putObject,
     calls,
@@ -470,6 +523,14 @@ test("OAuth accepts the configured email regardless of case", async (t) => {
       lastSuccessAt: null,
       emailConfigured: false,
       lastAlertAt: null,
+    },
+    alertEmail: {
+      enabled: false,
+      sender: "Sender@Example.com",
+      to: "admin@example.com",
+      authorized: false,
+      needsReauth: false,
+      authUrl: `${WORKER_URL}/google/alert-sender/auth-start`,
     },
   });
 });
@@ -692,11 +753,11 @@ test("backup uses all category folders and recovers existing Drive items after K
   assert.equal((await f.env.STATE.get("backup:last", "json")).remaining, 0);
 });
 
-test("daily token check with an empty bucket detects revocation and throttles Resend for 24h", async (t) => {
+test("daily token check with an empty bucket detects revocation and throttles the Gmail alert for 24h", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-19T06:00:00Z") });
   const options = {};
   const f = fixture(t, [], options);
-  f.env.RESEND_API_KEY = "mock-resend";
+  await f.authorizeSender();
   f.env.ALERT_EMAIL_TO = "vanete@example.com";
   f.env.ALERT_CC = "carlos@example.com";
   await f.connect();
@@ -721,18 +782,23 @@ test("daily token check with an empty bucket detects revocation and throttles Re
   assert.equal(status.health.lastAlertAt, "2026-11-20T06:00:00.000Z");
   const [mail] = f.emails;
   assert.equal(mail.method, "POST");
-  assert.equal(mail.headers.get("Authorization"), "Bearer mock-resend");
-  assert.equal(mail.headers.get("Content-Type"), "application/json");
-  assert.match(mail.headers.get("Idempotency-Key"), /^backup-warning\/[a-f0-9]{64}$/);
-  assert.equal(mail.body.from, "Site Tia Vanete <onboarding@resend.dev>");
-  assert.deepEqual(mail.body.to, ["vanete@example.com"]);
-  assert.deepEqual(mail.body.cc, ["carlos@example.com"]);
-  assert.match(mail.body.subject, /Google Drive/);
-  assert.match(mail.body.text, /Abra este link e clique em Permitir/);
-  assert.ok(mail.body.text.includes(status.health.actionUrl));
-  assert.ok(mail.body.html.includes(status.health.actionUrl));
-  assert.match(mail.body.html, /22px/);
-  assert.equal((await f.env.STATE.get("backup:alert", "json")).result, "sent");
+  assert.equal(mail.httpHeaders.get("Authorization"), "Bearer sender-access");
+  assert.equal(mail.httpHeaders.get("Content-Type"), "application/json");
+  assert.equal(mail.headers.from, "Site Tia Vanete <Sender@Example.com>");
+  assert.equal(mail.from, "Site Tia Vanete <Sender@Example.com>");
+  assert.equal(mail.headers.to, "vanete@example.com");
+  assert.equal(mail.headers.cc, "carlos@example.com");
+  assert.match(mail.headers.subject, /^=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=$/);
+  assert.equal(mail.subject, "Aviso sobre a cópia no Google Drive");
+  assert.match(mail.headers["content-type"], /^multipart\/alternative; boundary=/);
+  assert.equal(mail.headers["mime-version"], "1.0");
+  assert.match(mail.text, /Abra este link e clique em Permitir/);
+  assert.ok(mail.text.includes(status.health.actionUrl));
+  assert.ok(mail.html.includes(status.health.actionUrl));
+  assert.match(mail.html, /22px/);
+  const alert = await f.env.STATE.get("backup:alert", "json");
+  assert.equal(alert.result, "sent");
+  assert.equal(alert.provider, "gmail");
 
   t.mock.timers.setTime(Date.parse("2026-11-21T05:59:59Z"));
   await worker.scheduled({}, f.env);
@@ -740,14 +806,13 @@ test("daily token check with an empty bucket detects revocation and throttles Re
   t.mock.timers.setTime(Date.parse("2026-11-21T06:00:00Z"));
   await worker.scheduled({}, f.env);
   assert.equal(f.emails.length, 2);
-  assert.notEqual(f.emails[1].headers.get("Idempotency-Key"), mail.headers.get("Idempotency-Key"));
 });
 
 test("Google Drive 401 requests reconnection and a storage quota error asks for more space", async (t) => {
   t.mock.method(console, "error", () => {});
   const options = { uploadStatus: 403, uploadReason: "storageQuotaExceeded" };
   const f = fixture(t, [["arquivo.txt", 1]], options);
-  f.env.RESEND_API_KEY = "mock-resend";
+  await f.authorizeSender();
   await f.connect();
   await f.request("/backup/run", { method: "POST" });
   let status = await (await f.request("/google/status")).json();
@@ -755,9 +820,9 @@ test("Google Drive 401 requests reconnection and a storage quota error asks for 
   assert.equal(status.health.status, "error");
   assert.equal(f.emails.length, 0);
   await worker.scheduled({}, f.env);
-  assert.deepEqual(f.emails[0].body.to, ["admin@example.com"]);
-  assert.equal("cc" in f.emails[0].body, false);
-  assert.match(f.emails[0].body.text, /Libere espaço.*Google One/);
+  assert.equal(f.emails[0].headers.to, "admin@example.com");
+  assert.equal("cc" in f.emails[0].headers, false);
+  assert.match(f.emails[0].text, /Libere espaço.*Google One/);
   options.uploadStatus = 401;
   await worker.scheduled({}, f.env);
   status = await (await f.request("/google/status")).json();
@@ -770,7 +835,7 @@ test("repeated errors warn on the third failure and a clean run clears health", 
   t.mock.method(console, "error", () => {});
   const options = { failKey: "arquivo.txt" };
   const f = fixture(t, [["arquivo.txt", 1]], options);
-  f.env.RESEND_API_KEY = "mock-resend";
+  await f.authorizeSender();
   await f.connect();
   for (let failures = 1; failures <= 3; failures++) {
     await worker.scheduled({}, f.env);
@@ -779,7 +844,7 @@ test("repeated errors warn on the third failure and a clean run clears health", 
     assert.equal(health.lastSuccessAt, null);
     assert.equal(f.emails.length, failures < 3 ? 0 : 1);
   }
-  assert.match(f.emails[0].body.text, /Seus arquivos no site estão seguros.*Carlos/);
+  assert.match(f.emails[0].text, /Seus arquivos no site estão seguros.*Carlos/);
   options.failKey = null;
   await worker.scheduled({}, f.env);
   const { health } = await f.env.STATE.get("backup:last", "json");
@@ -794,7 +859,7 @@ test("stale warning starts after 48 hours even if the next run fails before any 
   t.mock.timers.enable({ apis: ["Date"], now: start });
   const options = {};
   const f = fixture(t, [], options);
-  f.env.RESEND_API_KEY = "mock-resend";
+  await f.authorizeSender();
   await f.connect();
   await worker.scheduled({}, f.env);
   t.mock.timers.setTime(start + 48 * 60 * 60 * 1000);
@@ -806,13 +871,13 @@ test("stale warning starts after 48 hours even if the next run fails before any 
   await worker.scheduled({}, f.env);
   assert.equal((await status()).problem, "stale");
   assert.equal((await f.env.STATE.get("backup:last", "json")).health.problem, "stale");
-  assert.match(f.emails[0].body.text, /mais de dois dias.*\n\nSeus arquivos no site estão seguros/);
+  assert.match(f.emails[0].text, /mais de dois dias.*\n\nSeus arquivos no site estão seguros/);
 });
 
 test("scheduled alerts require Google configuration, a connection, and an email provider", async (t) => {
   t.mock.method(console, "info", () => {});
   const f = fixture(t, [], { invalidGrant: true });
-  f.env.RESEND_API_KEY = "mock-resend";
+  await f.authorizeSender();
   await worker.scheduled({}, f.env);
   assert.equal(f.calls.length, 0);
   await f.connect();
@@ -820,7 +885,7 @@ test("scheduled alerts require Google configuration, a connection, and an email 
   await worker.scheduled({}, f.env);
   assert.equal(f.calls.length, 0);
   f.env.GOOGLE_CLIENT_ID = "client";
-  delete f.env.RESEND_API_KEY;
+  await f.env.STATE.delete("alert_sender:refresh_token");
   await worker.scheduled({}, f.env);
   const status = await (await f.request("/google/status")).json();
   assert.equal(status.health.emailConfigured, false);
@@ -831,7 +896,7 @@ test("scheduled alerts require Google configuration, a connection, and an email 
 
 test("a rejected email records the failure and leaves lastAlertAt empty", async (t) => {
   const f = fixture(t, [], { invalidGrant: true, mailStatus: 403 });
-  f.env.RESEND_API_KEY = "mock-resend";
+  await f.authorizeSender();
   await f.connect();
   await worker.scheduled({}, f.env);
   await worker.scheduled({}, f.env);
@@ -840,4 +905,97 @@ test("a rejected email records the failure and leaves lastAlertAt empty", async 
   assert.equal(alert.lastAlertAt, null);
   assert.ok(alert.lastAttemptAt);
   assert.equal(f.emails.length, 1);
+});
+
+test("Drive authorization asks only for Drive scopes, never gmail.send", async (t) => {
+  const f = fixture(t);
+  const start = new URL((await f.request("/google/auth-start")).headers.get("Location"));
+  assert.equal(
+    start.searchParams.get("scope"),
+    "openid email https://www.googleapis.com/auth/drive.file",
+  );
+  assert.doesNotMatch(start.href, /gmail/);
+});
+
+test("alert sender flow accepts only ALERT_SENDER_EMAIL and stores its own token", async (t) => {
+  const options = {
+    googleEmail: "outra@example.com",
+    callbackRefresh: "sender-token",
+    grantedScope: "openid email https://www.googleapis.com/auth/gmail.send",
+  };
+  const f = fixture(t, [], options);
+  const response = await f.request("/google/alert-sender/auth-start");
+  assert.equal(response.status, 302);
+  const start = new URL(response.headers.get("Location"));
+  assert.equal(
+    start.searchParams.get("scope"),
+    "openid email https://www.googleapis.com/auth/gmail.send",
+  );
+  assert.equal(start.searchParams.get("redirect_uri"), `${WORKER_URL}/google/callback`);
+  assert.equal(start.searchParams.get("login_hint"), "Sender@Example.com");
+  assert.equal(start.searchParams.get("access_type"), "offline");
+  assert.equal(start.searchParams.has("include_granted_scopes"), false);
+  let state = start.searchParams.get("state");
+  assert.equal(f.data.get(`oauth_sender_state:${state}`).expirationTtl, 900);
+  assert.equal(f.data.has(`oauth_state:${state}`), false);
+
+  let callback = await f.request(`/google/callback?state=${state}&code=code`);
+  assert.equal(callback.status, 403);
+  assert.match(await callback.text(), /Sender@Example.com/);
+  assert.equal(f.data.has("alert_sender:refresh_token"), false);
+  assert.equal(f.data.has(`oauth_sender_state:${state}`), false);
+
+  options.googleEmail = "SENDER@example.com";
+  state = new URL(
+    (await f.request("/google/alert-sender/auth-start")).headers.get("Location"),
+  ).searchParams.get("state");
+  callback = await f.request(`/google/callback?state=${state}&code=code`);
+  assert.equal(callback.status, 200);
+  assert.match(await callback.text(), /Pronto! ✅/);
+  const sender = await f.env.STATE.get("alert_sender:refresh_token", "json");
+  assert.equal(sender.token, "sender-token");
+  assert.equal(sender.email, "SENDER@example.com");
+  assert.equal(f.data.has("google:refresh_token"), false);
+  const status = await (await f.request("/google/status")).json();
+  assert.equal(status.alertEmail.enabled, true);
+  assert.equal(status.alertEmail.authorized, true);
+  assert.equal(status.connected, false);
+});
+
+test("alert sender flow rejects a grant without gmail.send", async (t) => {
+  const f = fixture(t, [], {
+    googleEmail: "sender@example.com",
+    grantedScope: "openid email",
+  });
+  const state = new URL(
+    (await f.request("/google/alert-sender/auth-start")).headers.get("Location"),
+  ).searchParams.get("state");
+  const callback = await f.request(`/google/callback?state=${state}&code=code`);
+  assert.equal(callback.status, 403);
+  assert.equal(f.data.has("alert_sender:refresh_token"), false);
+});
+
+test("a revoked sender token turns the e-mail alert off and shows it in /google/status", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  t.mock.method(console, "info", () => {});
+  const f = fixture(t, [], { invalidGrant: true, senderInvalidGrant: true });
+  await f.connect();
+  await f.authorizeSender();
+  await worker.scheduled({}, f.env);
+  assert.equal(f.emails.length, 0);
+  const alert = await f.env.STATE.get("backup:alert", "json");
+  assert.equal(alert.result, "failed");
+  assert.equal(alert.lastAlertAt, null);
+  const status = await (await f.request("/google/status")).json();
+  assert.equal(status.alertEmail.enabled, false);
+  assert.equal(status.alertEmail.authorized, true);
+  assert.equal(status.alertEmail.needsReauth, true);
+  assert.equal(status.health.emailConfigured, false);
+  assert.equal(status.health.problem, "google_needs_reauth");
+  // Re-authorizing (new connection id) turns it back on.
+  await f.env.STATE.put(
+    "alert_sender:refresh_token",
+    JSON.stringify({ token: "sender-token", email: "sender@example.com", connectionId: "novo" }),
+  );
+  assert.equal((await (await f.request("/google/status")).json()).alertEmail.enabled, true);
 });

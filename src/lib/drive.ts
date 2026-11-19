@@ -26,6 +26,14 @@ export interface DriveStatus {
     emailConfigured: boolean;
     lastAlertAt: string | null;
   };
+  alertEmail?: {
+    enabled: boolean;
+    sender: string;
+    to: string;
+    authorized: boolean;
+    needsReauth: boolean;
+    authUrl: string;
+  };
 }
 
 export interface DriveFolder {

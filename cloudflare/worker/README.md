@@ -26,16 +26,17 @@ Se o Google Drive perder a ligação, ficar sem espaço ou a cópia falhar vári
 
 ### Para o Carlos ativar o e-mail
 
-O aviso por e-mail usa o **Resend**, numa conta só deste projeto. O remetente padrão é **Site Tia Vanete <onboarding@resend.dev>**, o endereço de teste do Resend, que não precisa de domínio. Esse endereço só entrega para o e-mail dono da conta do Resend. Por isso a conta precisa ser criada com o Gmail da Tia Vanete (**vanetedeoliveiramaffra@gmail.com**).
+O aviso sai do Gmail do Carlos (**Carloshen.senai@gmail.com**, definido em `ALERT_SENDER_EMAIL`) e chega no Gmail da Tia Vanete (**vanetedeoliveiramaffra@gmail.com**, definido em `ALERT_EMAIL_TO`). O remetente aparece como **Site Tia Vanete <Carloshen.senai@gmail.com>**. O envio usa a API do Gmail com o mesmo cliente OAuth do Google Drive (`GOOGLE_CLIENT_ID` e `GOOGLE_CLIENT_SECRET`), sem nenhum serviço extra e sem custo.
 
-1. Crie uma conta no Resend com o e-mail **vanetedeoliveiramaffra@gmail.com** e confirme o cadastro pelo link que chega nesse Gmail.
-2. Nessa conta, crie uma chave de API com permissão **Sending access**.
-3. No painel da Cloudflare, abra **Workers & Pages → tiavanete-files → Settings → Variables and Secrets**. Adicione um **Secret** com o nome `RESEND_API_KEY` e cole a chave do Resend. Pelo terminal, no diretório `cloudflare/worker`, use `wrangler secret put RESEND_API_KEY --name tiavanete-files`.
-4. Quem recebe é definido em `ALERT_EMAIL_TO` (o Gmail da Tia Vanete). Com o remetente de teste, `ALERT_CC` não funciona, porque o Resend só entrega para o dono da conta.
+1. No [Google Cloud Console](https://console.cloud.google.com), no projeto **Site Tia Vanete**, abra **APIs e serviços → Biblioteca**, procure **Gmail API** e clique em **Ativar**.
+2. Abra **Google Auth Platform → Acesso a dados** (Data Access), clique em **Adicionar ou remover escopos** e marque também `https://www.googleapis.com/auth/gmail.send` (enviar e-mails em seu nome). Salve. Os escopos `openid`, `userinfo.email` e `drive.file` continuam lá.
+3. Entre no navegador com a conta **Carloshen.senai@gmail.com** e abra <https://tiavanete-files.carloshen.workers.dev/google/alert-sender/auth-start>.
+4. O `gmail.send` é um escopo sensível e o app está publicado sem verificação do Google, então aparece **"O Google não verificou este app"**. Clique em **Avançado → Acessar Site Tia Vanete (não seguro)** e depois em **Permitir** (marque a caixa de enviar e-mails, se ela aparecer).
+5. Aparece **Pronto! ✅**. A partir daí, quando houver problema na cópia, a Tia Vanete recebe no máximo um e-mail a cada 24 horas.
 
-Se mais tarde a Tia Vanete tiver um domínio próprio, verifique esse domínio no Resend e configure `EMAIL_FROM` com um endereço dele, por exemplo `Site Tia Vanete <avisos@dominio-dela.com.br>`. Assim o aviso pode ir para qualquer destinatário, inclusive a cópia em `ALERT_CC`.
+O link só aceita a conta definida em `ALERT_SENDER_EMAIL`. A autorização da Tia Vanete para o Drive (`/google/auth-start`) pede só `openid`, `email` e `drive.file`, por isso ela **não** vê o aviso de app não verificado. Os dois fluxos guardam tokens separados no KV (`google:refresh_token` para o Drive dela e `alert_sender:refresh_token` para o Gmail do Carlos).
 
-Se preferir o **Cloudflare Email Routing**, ative o serviço no domínio próprio da Tia Vanete. Verifique o e-mail dela como destino e também o seu, se usar `ALERT_CC`. No Worker `tiavanete-files`, adicione um binding **Send Email** com o nome `ALERT_EMAIL` que permita os destinos escolhidos. Configure `EMAIL_FROM` com um endereço desse domínio e mantenha `RESEND_API_KEY` ausente para usar essa opção. O Worker dá preferência ao Resend quando a chave está configurada.
+Se o Carlos trocar a senha do Google ou remover o acesso do app, o painel mostra **Aviso por e-mail desligado** com o link para ligar de novo. Enquanto o Gmail não estiver autorizado, o Worker só registra o problema no log e o aviso vermelho continua aparecendo no painel. Para mandar uma cópia do aviso para outro endereço, preencha `ALERT_CC`.
 
 ## Endpoints
 
@@ -47,7 +48,8 @@ Se preferir o **Cloudflare Email Routing**, ative o serviço no domínio própri
 | `HEAD ou DELETE /object?path=`                   | Consulta ou exclui um arquivo do R2.                                                              |
 | `POST /migrate`                                  | Copia arquivos do Supabase para o R2 com o cabeçalho `x-migrate-secret`.                          |
 | `GET /google/auth-start`, `GET /google/callback` | Ligam a conta autorizada do Google Drive.                                                         |
-| `GET /google/status`                             | Mostra a ligação do Drive e o último lote do backup.                                              |
+| `GET /google/alert-sender/auth-start`            | Liga o Gmail que envia os avisos (`ALERT_SENDER_EMAIL`). Volta por `/google/callback`.            |
+| `GET /google/status`                             | Mostra a ligação do Drive, o último lote do backup e se o aviso por e-mail está ligado.           |
 | `POST /backup/run`                               | Executa um lote agora e informa quantos arquivos foram copiados, falharam ou continuam pendentes. |
 | `GET ou POST /drive/folders`                     | Lista ou cria pastas para arquivos pessoais.                                                      |
 | `POST /drive/upload-session`                     | Cria a sessão para o navegador enviar o arquivo direto ao Drive.                                  |

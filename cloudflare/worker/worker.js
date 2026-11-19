@@ -8,6 +8,12 @@ const USAGE_KEY = "usage:total";
 const R2_PART_SIZE = 8 * 1024 ** 2;
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+// Only Carlos's alert-sender authorization asks for this scope; Tia Vanete's Drive
+// authorization never includes it, so she does not see Google's "unverified app" screen.
+const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
+const GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
+const SENDER_TOKEN_KEY = "alert_sender:refresh_token";
+const SENDER_STATUS_KEY = "alert_sender:status";
 const DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files";
 const DRIVE_UPLOAD_URL =
   "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id";
@@ -18,7 +24,8 @@ const GOOGLE_NOT_CONNECTED = "O Google Drive ainda não está ligado. Peça ao C
 const GOOGLE_NEEDS_REAUTH = "Peça ao Carlos para ligar o Drive de novo.";
 const BACKUP_FETCH_BUDGET = 40;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const DEFAULT_EMAIL_FROM = "Site Tia Vanete <onboarding@resend.dev>";
+const DEFAULT_ALERT_SENDER = "Carloshen.senai@gmail.com";
+const ALERT_SENDER_NAME = "Site Tia Vanete";
 const BACKUP_PROBLEMS = {
   google_needs_reauth: {
     message: "O Google Drive perdeu a ligação com o site.",
@@ -324,6 +331,10 @@ function callbackUrl(req, env) {
   return new URL("/google/callback", env.PUBLIC_WORKER_URL || req.url).href;
 }
 
+function alertSenderEmail(env) {
+  return env.ALERT_SENDER_EMAIL?.trim() || DEFAULT_ALERT_SENDER;
+}
+
 async function googleAuthStart(req, env) {
   const state = crypto.randomUUID();
   const redirectUri = callbackUrl(req, env);
@@ -344,6 +355,111 @@ async function googleAuthStart(req, env) {
     status: 302,
     headers: { Location: url.href, "Cache-Control": "no-store" },
   });
+}
+
+// Carlos authorizes his own Gmail once so the alerts go out from it. Same OAuth client and
+// callback URL as the Drive flow, but its own state prefix, scopes and KV keys.
+async function alertSenderAuthStart(req, env) {
+  const state = crypto.randomUUID();
+  const redirectUri = callbackUrl(req, env);
+  await env.STATE.put(`oauth_sender_state:${state}`, redirectUri, { expirationTtl: 900 });
+  const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  url.search = new URLSearchParams({
+    client_id: env.GOOGLE_CLIENT_ID,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    scope: `openid email ${GMAIL_SEND_SCOPE}`,
+    access_type: "offline",
+    prompt: "consent",
+    login_hint: alertSenderEmail(env),
+    state,
+  });
+  return new Response(null, {
+    status: 302,
+    headers: { Location: url.href, "Cache-Control": "no-store" },
+  });
+}
+
+async function alertSenderCallback(url, env, stateKey, redirectUri) {
+  const title = "O aviso por e-mail ainda não foi ligado";
+  await env.STATE.delete(stateKey);
+  const code = url.searchParams.get("code");
+  if (url.searchParams.has("error") || !code) {
+    return callbackPage(title, "O pedido foi cancelado. Abra o link de novo para tentar.", 400);
+  }
+  const response = await requestGoogleToken(env, {
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: redirectUri,
+  });
+  if (!response.ok) throw new Error(`Google OAuth: ${response.status}`);
+  const { access_token, refresh_token, scope } = await response.json();
+  if (!access_token || !refresh_token)
+    throw new Error("Google OAuth não retornou os dados da conexão.");
+  if (scope && !scope.split(/\s+/).includes(GMAIL_SEND_SCOPE)) {
+    return callbackPage(
+      title,
+      "Marque a permissão de enviar e-mails pelo Gmail e abra o link de novo.",
+      403,
+    );
+  }
+  const user = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+    headers: { Authorization: `Bearer ${access_token}` },
+  });
+  if (!user.ok) throw new Error(`Google userinfo: ${user.status}`);
+  const { email, email_verified } = await user.json();
+  if (
+    !email_verified ||
+    typeof email !== "string" ||
+    email.toLowerCase() !== alertSenderEmail(env).toLowerCase()
+  ) {
+    return callbackPage(
+      title,
+      `Use a conta ${escapeEmailHtml(alertSenderEmail(env))} para ligar o aviso por e-mail.`,
+      403,
+    );
+  }
+  await env.STATE.put(
+    SENDER_TOKEN_KEY,
+    JSON.stringify({
+      token: refresh_token,
+      email,
+      connectedAt: new Date().toISOString(),
+      connectionId: crypto.randomUUID(),
+    }),
+  );
+  return callbackPage(
+    "Pronto! ✅",
+    `Os avisos da cópia no Google Drive vão sair de ${escapeEmailHtml(email)}. Pode fechar esta página.`,
+  );
+}
+
+async function alertSenderConnection(env) {
+  const [sender, status] = await Promise.all([
+    env.STATE.get(SENDER_TOKEN_KEY, "json"),
+    env.STATE.get(SENDER_STATUS_KEY, "json"),
+  ]);
+  if (sender?.email?.toLowerCase() !== alertSenderEmail(env).toLowerCase()) {
+    return { sender: null, needsReauth: false };
+  }
+  return {
+    sender,
+    needsReauth: status?.state === "needs_reauth" && status.connectionId === sender.connectionId,
+  };
+}
+
+function alertEmailStatus(env, { sender, needsReauth }, requestUrl) {
+  return {
+    enabled: Boolean(sender) && !needsReauth,
+    sender: alertSenderEmail(env),
+    to: env.ALERT_EMAIL_TO?.trim() || allowedEmail(env),
+    authorized: Boolean(sender),
+    needsReauth,
+    authUrl: new URL(
+      "/google/alert-sender/auth-start",
+      env.PUBLIC_WORKER_URL || requestUrl || "https://tiavanete-files.carloshen.workers.dev",
+    ).href,
+  };
 }
 
 function callbackPage(title, message, status = 200) {
@@ -386,8 +502,12 @@ function requestGoogleToken(env, fields, request = fetch) {
 
 async function googleCallback(url, env) {
   const state = url.searchParams.get("state") ?? "";
+  const validState = /^[a-f0-9-]{36}$/.test(state);
+  const senderStateKey = `oauth_sender_state:${state}`;
+  const senderRedirect = validState ? await env.STATE.get(senderStateKey) : null;
+  if (senderRedirect) return alertSenderCallback(url, env, senderStateKey, senderRedirect);
   const stateKey = `oauth_state:${state}`;
-  const redirectUri = /^[a-f0-9-]{36}$/.test(state) ? await env.STATE.get(stateKey) : null;
+  const redirectUri = validState ? await env.STATE.get(stateKey) : null;
   const title = "O Google Drive ainda não foi ligado";
   if (!redirectUri) {
     return callbackPage(
@@ -526,17 +646,28 @@ async function googleAccessToken(env, request = fetch, forceRefresh = false) {
 }
 
 async function googleStatus(req, env) {
-  const [{ connection, needsReauth }, last, alert] = await Promise.all([
+  const [{ connection, needsReauth }, last, alert, sender] = await Promise.all([
     googleConnection(env),
     env.STATE.get("backup:last", "json"),
     env.STATE.get("backup:alert", "json"),
+    alertSenderConnection(env),
   ]);
+  const alertEmail = alertEmailStatus(env, sender, req.url);
   return json(req, {
     configured: true,
     connected: Boolean(connection) && !needsReauth,
     email: connection?.email ?? null,
     needsReauth,
-    health: backupHealth(env, connection, needsReauth, healthFor(last, connection), alert, req.url),
+    health: backupHealth(
+      env,
+      connection,
+      needsReauth,
+      healthFor(last, connection),
+      alert,
+      req.url,
+      alertEmail.enabled,
+    ),
+    alertEmail,
     lastBackup: last && {
       at: last.at,
       copied: last.copied,
@@ -1040,7 +1171,7 @@ function backupProblem(connection, needsReauth, health) {
   return health.failedRuns >= 3 ? "repeated_failures" : null;
 }
 
-function backupHealth(env, connection, needsReauth, health, alert, requestUrl) {
+function backupHealth(env, connection, needsReauth, health, alert, requestUrl, emailEnabled) {
   const problem = backupProblem(connection, needsReauth, health);
   const detail = BACKUP_PROBLEMS[problem];
   return {
@@ -1060,7 +1191,7 @@ function backupHealth(env, connection, needsReauth, health, alert, requestUrl) {
           ).href
         : (detail?.actionUrl ?? null),
     lastSuccessAt: health.lastSuccessAt ?? null,
-    emailConfigured: Boolean(env.RESEND_API_KEY || env.ALERT_EMAIL?.send),
+    emailConfigured: Boolean(emailEnabled),
     lastAlertAt: alert?.lastAlertAt ?? null,
   };
 }
@@ -1079,59 +1210,113 @@ function escapeEmailHtml(value) {
   );
 }
 
-async function sendRoutingAlert(binding, { from, to, cc, subject, text, html }) {
-  const { EmailMessage } = await import("cloudflare:email");
-  const sender = from.match(/<([^<>]+)>$/)?.[1] ?? from;
-  const boundary = crypto.randomUUID();
-  const encode = (value) => btoa(String.fromCharCode(...new TextEncoder().encode(value)));
+function base64Utf8(value) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000)
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
+function encodedWord(value) {
+  return /^[\x20-\x7e]*$/.test(value) ? value : `=?UTF-8?B?${base64Utf8(value)}?=`;
+}
+
+function mimeMessage({ from, to, cc, subject, text, html }) {
+  for (const value of [from, to, cc ?? "", subject]) {
+    if (/[\r\n]/.test(value)) throw new Error("Cabeçalho inválido.");
+  }
+  const boundary = `alt-${crypto.randomUUID()}`;
   const part = (type, body) => [
     `--${boundary}`,
     `Content-Type: ${type}; charset=UTF-8`,
     "Content-Transfer-Encoding: base64",
     "",
-    ...encode(body).match(/.{1,76}/g),
+    ...base64Utf8(body).match(/.{1,76}/g),
   ];
-  const send = (recipient) => {
-    if ([sender, recipient].some((address) => /[\r\n]/.test(address)))
-      throw new Error("Endereço inválido.");
-    const raw = [
-      `From: ${sender}`,
-      `To: ${recipient}`,
-      `Subject: =?UTF-8?B?${encode(subject)}?=`,
-      `Date: ${new Date().toUTCString()}`,
-      `Message-ID: <${crypto.randomUUID()}@${sender.split("@")[1] || "localhost"}>`,
-      "MIME-Version: 1.0",
-      `Content-Type: multipart/alternative; boundary="${boundary}"`,
-      "",
-      ...part("text/plain", text),
-      ...part("text/html", html),
-      `--${boundary}--`,
-      "",
-    ].join("\r\n");
-    return binding.send(new EmailMessage(sender, recipient, raw));
-  };
-  await send(to[0]);
-  if (cc && cc[0].toLowerCase() !== to[0].toLowerCase()) {
-    try {
-      await send(cc[0]);
-    } catch {
-      return "sent_cc_failed";
-    }
+  return [
+    `From: ${encodedWord(ALERT_SENDER_NAME)} <${from}>`,
+    `To: ${to}`,
+    ...(cc ? [`Cc: ${cc}`] : []),
+    `Subject: ${encodedWord(subject)}`,
+    `Date: ${new Date().toUTCString()}`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    "",
+    ...part("text/plain", text),
+    ...part("text/html", html),
+    `--${boundary}--`,
+    "",
+  ].join("\r\n");
+}
+
+function base64Url(value) {
+  return base64Utf8(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function markSenderReauth(env, sender) {
+  await env.STATE.put(
+    SENDER_STATUS_KEY,
+    JSON.stringify({ state: "needs_reauth", connectionId: sender.connectionId }),
+  );
+}
+
+// Sends through the Gmail API as the authorized sender. Returns "sent" or "failed".
+async function sendGmailAlert(env, sender, mail) {
+  const tokenResponse = await requestGoogleToken(env, {
+    grant_type: "refresh_token",
+    refresh_token: sender.token,
+  });
+  const token = await tokenResponse.json().catch(() => ({}));
+  if (tokenResponse.status === 401 || token?.error === "invalid_grant") {
+    await markSenderReauth(env, sender);
+    console.warn("A autorização do Gmail que envia os avisos foi revogada.");
+    return "failed";
   }
-  return "sent";
+  if (!tokenResponse.ok || !token?.access_token)
+    throw new Error(`Google token: ${tokenResponse.status}`);
+  const response = await fetch(GMAIL_SEND_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token.access_token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ raw: base64Url(mimeMessage({ ...mail, from: alertSenderEmail(env) })) }),
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000),
+  });
+  await response.body?.cancel();
+  if (response.status === 401) {
+    await markSenderReauth(env, sender);
+    return "failed";
+  }
+  return response.ok ? "sent" : "failed";
 }
 
 async function alertBackupProblem(env) {
-  const [{ connection, needsReauth }, last, alert] = await Promise.all([
+  const [{ connection, needsReauth }, last, alert, senderState] = await Promise.all([
     googleConnection(env),
     env.STATE.get("backup:last", "json"),
     env.STATE.get("backup:alert", "json"),
+    alertSenderConnection(env),
   ]);
   if (!connection) return;
-  const health = backupHealth(env, connection, needsReauth, healthFor(last, connection), alert);
+  const emailEnabled = Boolean(senderState.sender) && !senderState.needsReauth;
+  const health = backupHealth(
+    env,
+    connection,
+    needsReauth,
+    healthFor(last, connection),
+    alert,
+    undefined,
+    emailEnabled,
+  );
   if (!health.problem) return;
-  if (!health.emailConfigured) {
-    console.info("Aviso da cópia do Google Drive sem e-mail configurado.", health.problem);
+  if (!emailEnabled) {
+    console.info(
+      "Aviso da cópia do Google Drive sem Gmail autorizado para enviar.",
+      health.problem,
+    );
     return;
   }
   const now = Date.now();
@@ -1142,55 +1327,36 @@ async function alertBackupProblem(env) {
     return;
   const at = new Date(now).toISOString();
   const actionLink = health.actionUrl
-    ? `<p><a href="${escapeEmailHtml(health.actionUrl)}">${
+    ? `<p><a href="${escapeEmailHtml(health.actionUrl)}" style="font-size:24px;font-weight:bold">${
         health.problem === "google_needs_reauth"
           ? "Ligar o Google Drive de novo"
           : "Abrir o Google One"
       }</a></p>`
     : "";
+  const to = env.ALERT_EMAIL_TO?.trim() || allowedEmail(env);
+  const cc = env.ALERT_CC?.trim();
   const mail = {
-    from: env.EMAIL_FROM?.trim() || DEFAULT_EMAIL_FROM,
-    to: [env.ALERT_EMAIL_TO?.trim() || allowedEmail(env)],
-    ...(env.ALERT_CC?.trim() && { cc: [env.ALERT_CC.trim()] }),
+    to,
+    ...(cc && cc.toLowerCase() !== to.toLowerCase() && { cc }),
     subject: "Aviso sobre a cópia no Google Drive",
     text: ["Olá, Tia Vanete!", health.message, health.action, health.actionUrl]
       .filter(Boolean)
       .join("\n\n"),
     html: `<div lang="pt-BR" style="font:22px/1.5 Arial,sans-serif;color:#181818"><p>Olá, Tia Vanete!</p><p><strong>${health.message}</strong></p><p>${health.action}</p>${actionLink}</div>`,
   };
-  const provider = env.RESEND_API_KEY ? "resend" : "email_routing";
   let result = "failed";
   try {
-    if (env.RESEND_API_KEY) {
-      const alertKey = await digestText(
-        JSON.stringify([env.PUBLIC_WORKER_URL, mail.to, alert?.lastAlertAt ?? null]),
-      );
-      const response = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${env.RESEND_API_KEY}`,
-          "Content-Type": "application/json",
-          "Idempotency-Key": `backup-warning/${alertKey}`,
-        },
-        body: JSON.stringify(mail),
-        redirect: "error",
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (response.ok) result = "sent";
-      await response.body?.cancel();
-    } else {
-      result = await sendRoutingAlert(env.ALERT_EMAIL, mail);
-    }
+    result = await sendGmailAlert(env, senderState.sender, mail);
   } catch {
-    console.warn("Falha ao enviar o aviso da cópia do Google Drive.", provider);
+    console.warn("Falha ao enviar o aviso da cópia do Google Drive pelo Gmail.");
   }
   await env.STATE.put(
     "backup:alert",
     JSON.stringify({
       lastAttemptAt: at,
-      lastAlertAt: result === "failed" ? (alert?.lastAlertAt ?? null) : new Date().toISOString(),
+      lastAlertAt: result === "sent" ? new Date().toISOString() : (alert?.lastAlertAt ?? null),
       result,
-      provider,
+      provider: "gmail",
       problem: health.problem,
     }),
   );
@@ -1198,9 +1364,13 @@ async function alertBackupProblem(env) {
 
 function googleRoute(path, method) {
   if (method === "GET")
-    return ["/google/auth-start", "/google/callback", "/google/status", "/drive/folders"].includes(
-      path,
-    );
+    return [
+      "/google/auth-start",
+      "/google/alert-sender/auth-start",
+      "/google/callback",
+      "/google/status",
+      "/drive/folders",
+    ].includes(path);
   return (
     method === "POST" && ["/backup/run", "/drive/folders", "/drive/upload-session"].includes(path)
   );
@@ -1214,6 +1384,7 @@ async function handleGoogle(req, env, url) {
 
   try {
     if (path === "/google/auth-start") return await googleAuthStart(req, env);
+    if (path === "/google/alert-sender/auth-start") return await alertSenderAuthStart(req, env);
     if (path === "/google/callback") return await googleCallback(url, env);
     const admin = await requireAdmin(req, env);
     if (admin.error) return json(req, { error: admin.error }, admin.status);

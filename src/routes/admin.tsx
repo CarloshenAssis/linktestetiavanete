@@ -147,6 +147,7 @@ function DriveStatusCard() {
   const last = status?.lastBackup;
   const health = status?.health;
   const warning = health && health.status !== "ok" ? health : null;
+  const alertEmail = status?.alertEmail;
   const buttonClass =
     "inline-flex w-fit items-center justify-center rounded-full bg-sky-800 px-5 py-3 text-lg font-semibold text-white hover:bg-sky-900 disabled:opacity-60";
   return (
@@ -217,6 +218,28 @@ function DriveStatusCard() {
         <a href={driveAuthUrl()} target="_blank" rel="noreferrer" className={buttonClass}>
           Ligar o Google Drive
         </a>
+      )}
+      {status?.configured && alertEmail && !alertEmail.enabled && (
+        <div
+          role="status"
+          className="w-full space-y-2 rounded-xl border-2 border-amber-700 bg-amber-50 p-4 text-amber-950"
+        >
+          <p className="text-xl font-bold">Aviso por e-mail desligado</p>
+          <p>
+            {alertEmail.needsReauth
+              ? `O Gmail ${alertEmail.sender} perdeu a permissão de enviar os avisos. O Carlos precisa ligar de novo.`
+              : `O Carlos ainda precisa ligar o Gmail ${alertEmail.sender}, que envia os avisos da cópia.`}{" "}
+            Os avisos continuam aparecendo aqui no painel.
+          </p>
+          <a
+            href={alertEmail.authUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex font-semibold text-amber-900 underline"
+          >
+            Ligar o aviso por e-mail (só para o Carlos)
+          </a>
+        </div>
       )}
       <Link to="/enviar-drive" className={buttonClass}>
         📁 Guardar arquivos no meu Google Drive
