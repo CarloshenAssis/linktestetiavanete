@@ -2,6 +2,12 @@ import { supabase } from "@/integrations/supabase/client";
 
 export type MaterialCategory = "mensagens" | "imagens" | "pdfs";
 
+export const MATERIAL_CATEGORY_LABELS: Record<MaterialCategory, string> = {
+  mensagens: "Mensagens",
+  imagens: "Imagens",
+  pdfs: "PDFs",
+};
+
 export interface Material {
   id: string;
   title: string;

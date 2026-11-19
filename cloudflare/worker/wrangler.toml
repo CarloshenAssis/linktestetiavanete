@@ -1,0 +1,24 @@
+name = "tiavanete-files"
+main = "worker.js"
+compatibility_date = "2025-09-01"
+no_bundle = true
+keep_vars = true
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "tiavanete-materials"
+
+[[kv_namespaces]]
+binding = "STATE"
+id = "8f80ce5133724d7eb50d063c05972aa9"
+
+[triggers]
+crons = ["*/10 6-8 * * *"]
+
+[vars]
+SUPABASE_URL = "https://ixoiwfqsyetyrivxrmbe.supabase.co"
+STORAGE_LIMIT_BYTES = "5368709120"
+ALLOWED_GOOGLE_EMAIL = "vanetedeoliveiramaffra@gmail.com"
+BACKUP_ROOT_NAME = "Backup Site Tia Vanete"
+UPLOAD_ROOT_NAME = "Arquivos da Tia Vanete"
+PUBLIC_WORKER_URL = "https://tiavanete-files.carloshen.workers.dev"
